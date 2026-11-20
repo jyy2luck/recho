@@ -1,0 +1,11 @@
+[package]
+name = "recho"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+recho-engine = { path = "../engine" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+egui_extras = { version = "=0.36.2", default-features = false }
