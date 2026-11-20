@@ -1,0 +1,4 @@
+/app/build/
+/dist/
+/research/evidence/
+.DS_Store

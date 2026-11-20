@@ -1,0 +1,31 @@
+{
+  "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "native": {
+    "plain_and_gzip_decoded_bytes": 80342,
+    "binary_bytes": 81930,
+    "exact_copy": true,
+    "text_and_hex_scroll_to_tail": true,
+    "quick_filters": true,
+    "pause_resume": true,
+    "clear_preserves_history": true
+  },
+  "workload": {
+    "sequential_posts": 200,
+    "request_and_response_bytes_each": 64160,
+    "spacing_ms": 30,
+    "stable_window_seconds": 3
+  },
+  "clean_shutdown": true,
+  "empty": {
+    "footprint_mib": 125.64,
+    "rss_mib": 115.92,
+    "cpu_percent_one_core": 0.0
+  },
+  "loaded": {
+    "footprint_mib": 186.69,
+    "rss_mib": 154.78,
+    "cpu_percent_one_core": 0.0
+  },
+  "sampled_peak_footprint_mib": 201.47,
+  "executable_bytes": 15618672
+}

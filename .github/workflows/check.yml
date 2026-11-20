@@ -1,0 +1,26 @@
+name: Check
+on: [push, pull_request]
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check macOS
+        if: runner.os == 'macOS'
+        run: ./scripts/check.sh
+      - name: Check Windows
+        if: runner.os == 'Windows'
+        run: ./scripts/check.ps1
+      - name: Build release
+        run: cargo build --release --locked -p recho
