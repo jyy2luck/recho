@@ -907,7 +907,11 @@ test('HTTPS decryption survives restarts and disabled mode remains a transparent
   assert.equal((await localAPI('/state')).value.interceptTLS, false);
   await localAPI('/sessions', 'DELETE');
   assert.match(await httpsThroughProxy(local, ca), /local TLS payload/);
-  sessions = (await localAPI('/state')).value.sessions;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    sessions = (await localAPI('/state')).value.sessions;
+    if (sessions.some(s => s.responseBody.includes('HTTPS decryption is disabled'))) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.ok(sessions.every(s => s.method === 'CONNECT'));
   assert.ok(sessions.some(s => s.responseBody.includes('HTTPS decryption is disabled')));
 });

@@ -63,6 +63,12 @@ def tree():
     return json.dumps(json.loads(ui("tree")), ensure_ascii=False)
 
 
+def copy_body(expected):
+    ui("clear-clipboard")
+    ui("press", "复制完整正文")
+    wait_for(lambda: subprocess.check_output(["pbpaste"]) == expected, timeout=3)
+
+
 def screenshot(name):
     windows = json.loads(ui("windows"))
     window = next(window for window in windows if window.get("kCGWindowName") == "recho")
@@ -125,11 +131,14 @@ try:
     wait_for(lambda: url in tree())
     ui("double-click-text", url)
     wait_for(lambda: "复制完整正文" in tree())
-    ui("click-text", "复制完整正文")
-    time.sleep(.4)
-    copied = subprocess.check_output(["pbpaste"])
-    assert copied == text, f"Plain body copy differs: {len(copied)} / {len(text)}"
+    copy_body(text)
     screenshot("plain-detail")
+    ui("click-text", "请求体")
+    copy_body(text)
+    ui("click-text", "请求头")
+    wait_for(lambda: "80342" in tree() and "text/plain" in tree())
+    screenshot("request-headers")
+    ui("click-text", "总览")
     ui("hover-text", "native-start")
     ui("scroll", -10000)
     wait_for(lambda: "native-tail-END" in tree())
@@ -148,9 +157,7 @@ try:
     wait_for(lambda: gzip_url in tree())
     ui("double-click-text", gzip_url)
     wait_for(lambda: "复制完整正文" in tree())
-    ui("click-text", "复制完整正文")
-    time.sleep(.4)
-    assert subprocess.check_output(["pbpaste"]) == text
+    copy_body(text)
     screenshot("gzip-detail")
     ui("click-text", "JSON")
     wait_for(lambda: "共 0 项" in tree())
@@ -179,7 +186,7 @@ try:
     wait_for(lambda: not api("/state")["sessions"])
     database = sqlite3.connect(f"file:{data / 'history.sqlite'}?mode=ro", uri=True)
     assert database.execute("SELECT count(*) FROM sessions").fetchone()[0] == 3
-    report["native"] = {"plain_and_gzip_decoded_bytes": len(text), "binary_bytes": len(binary), "exact_copy": True, "text_and_hex_scroll_to_tail": True, "quick_filters": True, "pause_resume": True, "clear_preserves_history": True}
+    report["native"] = {"plain_and_gzip_decoded_bytes": len(text), "binary_bytes": len(binary), "exact_copy": True, "request_body_and_headers": True, "text_and_hex_scroll_to_tail": True, "quick_filters": True, "pause_resume": True, "clear_preserves_history": True}
     print("Native capture, copy, pause/resume and clear passed", flush=True)
 
     payload = ("p" * 400 + "\n") * 160

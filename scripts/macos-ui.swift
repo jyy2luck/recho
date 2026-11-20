@@ -94,6 +94,8 @@ case "paste":
     NSPasteboard.general.clearContents()
     NSPasteboard.general.setString(CommandLine.arguments[3], forType: .string)
     key(9, flags: .maskCommand)
+case "clear-clipboard":
+    NSPasteboard.general.clearContents()
 case "scroll":
     let event = CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 1, wheel1: Int32(CommandLine.arguments[3])!, wheel2: 0, wheel3: 0)!
     event.location = CGEvent(source: nil)!.location

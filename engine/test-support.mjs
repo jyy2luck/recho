@@ -34,8 +34,11 @@ export async function assertPrivateFile(file) {
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     return;
   }
+  const environment = { ...process.env, RECHO_TEST_ACL_PATH: file };
+  // Windows PowerShell must load its own modules when launched from PowerShell 7.
+  for (const key of Object.keys(environment)) if (key.toLowerCase() === 'psmodulepath') delete environment[key];
   const { stdout } = await promisify(execFile)('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '(Get-Acl -LiteralPath $env:RECHO_TEST_ACL_PATH).Sddl'], {
-    env: { ...process.env, RECHO_TEST_ACL_PATH: file }, windowsHide: true,
+    env: environment, windowsHide: true,
   });
   assert.match(stdout, /D:P/);
   const principals = [...stdout.matchAll(/;;;([^;)]+)\)/g)].map(match => match[1]);

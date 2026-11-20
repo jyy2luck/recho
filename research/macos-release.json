@@ -4,6 +4,7 @@
     "plain_and_gzip_decoded_bytes": 80342,
     "binary_bytes": 81930,
     "exact_copy": true,
+    "request_body_and_headers": true,
     "text_and_hex_scroll_to_tail": true,
     "quick_filters": true,
     "pause_resume": true,
@@ -17,15 +18,15 @@
   },
   "clean_shutdown": true,
   "empty": {
-    "footprint_mib": 125.64,
-    "rss_mib": 115.92,
+    "footprint_mib": 124.99,
+    "rss_mib": 115.06,
     "cpu_percent_one_core": 0.0
   },
   "loaded": {
-    "footprint_mib": 186.69,
-    "rss_mib": 154.78,
+    "footprint_mib": 186.92,
+    "rss_mib": 154.97,
     "cpu_percent_one_core": 0.0
   },
-  "sampled_peak_footprint_mib": 201.47,
+  "sampled_peak_footprint_mib": 201.95,
   "executable_bytes": 15618672
 }
