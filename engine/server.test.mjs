@@ -705,10 +705,19 @@ test('request breakpoints appear through the API and resume with edited content'
   let pending = [];
   for (let attempt = 0; attempt < 20 && !pending.length; attempt += 1) pending = (await api('/breakpoints')).value.pending;
   assert.equal(pending.length, 1);
-  assert.equal((await api(`/breakpoints/${pending[0].id}`, 'POST', { action: 'continue', request: { ...pending[0].request, body: 'edited' } })).status, 200);
+  const path = `/breakpoints/${pending[0].id}`;
+  const summaries = (await api('/breakpoints?summary=1')).value.pending;
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].id, pending[0].id);
+  assert.deepEqual(summaries[0].request, { method: 'POST', url });
+  assert.equal(summaries[0].response, undefined);
+  const detail = await api(path);
+  assert.deepEqual(detail.value, pending[0]);
+  assert.equal((await api(path, 'POST', { action: 'continue', request: { ...detail.value.request, body: 'edited' } })).status, 200);
   const result = await resultPromise;
   assert.equal(result.value.requestBody, 'edited');
   assert.equal(JSON.parse(result.value.responseBody).body, 'edited');
+  assert.equal((await api(path)).status, 404);
 });
 
 test('disconnecting a composer or proxy request cancels its breakpoint before any upstream request', async t => {
@@ -1082,6 +1091,9 @@ test('history stores complete bodies beyond preview, supports decoding and indiv
   const compressed=await api('/request','POST',{url:`${base}/gzip`});
   body=await request({host:'127.0.0.1',port:engine.controlPort,path:`/history/${compressed.value.id}/body?decoded=true`,headers:{authorization:`Bearer ${token}`}});
   assert.equal(body.headers['content-encoding'],undefined);assert.equal(body.body.toString(),'{"compressed":true}');
+  const { value: { sessions: [snapshot] } } = await api('/library/snapshots', 'POST', { ids: [id] });
+  assert.equal(snapshot.retainedSnapshot, true);
+  assert.equal(Buffer.from(snapshot.requestBodyBase64, 'base64').toString(), 'z'.repeat(length));
   assert.equal((await api(`/history/${id}`,'DELETE')).status,200);
   body=await request({host:'127.0.0.1',port:engine.controlPort,path:`/history/${id}/body?phase=request`,headers:{authorization:`Bearer ${token}`}});assert.equal(body.status,404);
 });
@@ -1091,6 +1103,7 @@ test('incognito requests remain in memory without SQLite records or body files',
   await api('/settings','PATCH',{incognito:true,captureGroup:'private-test'});
   const result=await api('/request','POST',{url:`http://127.0.0.1:${origin.address().port}/private`,body:'private-body'});
   assert.equal(result.value.incognito,true);assert.equal(result.value.captureGroup,'private-test');
+  assert.equal((await api('/library/snapshots', 'POST', { ids: [result.value.id] })).status, 400);
   assert.equal((await api('/history?limit=200')).value.some(item=>item.id===result.value.id),false);
   const files=await readdir(path.join(directory,'bodies'));assert.equal(files.some(name=>name.startsWith(result.value.id)),false);
   const body=await request({host:'127.0.0.1',port:engine.controlPort,path:`/history/${result.value.id}/body?phase=request`,headers:{authorization:`Bearer ${token}`}});assert.equal(body.body.toString(),'private-body');

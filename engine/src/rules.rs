@@ -880,6 +880,34 @@ impl Rules {
     pub fn pending(&self) -> Value {
         json!({"pending": self.pending.lock().unwrap().values().map(|e| e.item.clone()).collect::<Vec<_>>()})
     }
+    pub fn pending_summary(&self) -> Value {
+        let pending = self.pending.lock().unwrap();
+        let summaries: Vec<_> = pending
+            .values()
+            .map(|entry| {
+                let item = &entry.item;
+                json!({
+                    "id": item.id,
+                    "ruleId": item.rule_id,
+                    "ruleName": item.rule_name,
+                    "phase": item.phase,
+                    "expiresAt": item.expires_at,
+                    "request": {"method": item.request.method, "url": item.request.url},
+                })
+            })
+            .collect();
+        json!({"pending": summaries})
+    }
+    pub fn pending_detail(&self, id: &str) -> Result<Value> {
+        let item = self
+            .pending
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|entry| entry.item.clone())
+            .ok_or_else(|| Error::new(404, "Breakpoint not found or already resumed"))?;
+        Ok(serde_json::to_value(item)?)
+    }
     pub fn resume(&self, id: &str, edit: Value) -> Result<Value> {
         if ["request", "response"]
             .iter()

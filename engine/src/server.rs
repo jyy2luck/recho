@@ -1295,7 +1295,7 @@ impl Engine {
         .await;
         result.unwrap_or_else(error_reply)
     }
-    async fn control(self: Arc<Self>, mut request: Request<Incoming>) -> Reply {
+    async fn control(self: Arc<Self>, request: Request<Incoming>) -> Reply {
         let supplied = request
             .headers()
             .get("authorization")
@@ -1305,6 +1305,13 @@ impl Engine {
         if !bool::from(supplied.ct_eq(expected.as_bytes())) {
             return error_reply(Error::new(401, "Unauthorized"));
         }
+        self.control_local(request).await
+    }
+    async fn control_local<B>(self: Arc<Self>, mut request: Request<B>) -> Reply
+    where
+        B: HttpBody<Data = Bytes> + Unpin,
+        B::Error: std::fmt::Display,
+    {
         let result = async {
             let path = request.uri().path().to_string();
             let verb = request.method().as_str().to_string();
@@ -1350,6 +1357,48 @@ impl Engine {
                     Ok(json_reply(200, json!({"document":document})))
                 }
                 ("GET", "/ui-operations") => Ok(json_reply(200, self.ui.pending())),
+                ("POST", "/library/snapshots") => {
+                    let input = self.read_json(&mut request).await?;
+                    let ids = input["ids"].as_array().filter(|ids| (1..=100).contains(&ids.len()))
+                        .ok_or_else(|| Error::bad("Select 1–100 captures to save"))?;
+                    let mut sessions = Vec::with_capacity(ids.len());
+                    let mut size = 0;
+                    const LIMIT: usize = 16 * 1024 * 1024;
+                    let store = self.history.lock().unwrap();
+                    for id in ids {
+                        let id = id.as_str().ok_or_else(|| Error::bad("Capture ID must be a string"))?;
+                        let session = store.get(id)?.ok_or_else(|| Error::new(404, "Capture no longer available"))?;
+                        if session.incognito {
+                            return Err(Error::bad("Incognito captures cannot be saved to the library"));
+                        }
+                        let mut value = serde_json::to_value(session)?;
+                        value["retainedSnapshot"] = json!(true);
+                        let mut bytes_in_snapshot = serde_json::to_vec(&value)?.len();
+                        for phase in ["request", "response"] {
+                            let status = format!("{phase}BodyComplete");
+                            if value[&status] != true {
+                                value[&status] = json!(false);
+                                continue;
+                            }
+                            match store.body(id, phase) {
+                                Ok((body, _)) => {
+                                    bytes_in_snapshot += body.len().div_ceil(3) * 4 + 32;
+                                    if size + bytes_in_snapshot > LIMIT {
+                                        return Err(Error::new(413, "Capture snapshots exceed 16 MiB; save fewer captures at a time"));
+                                    }
+                                    value[format!("{phase}BodyBase64")] = json!(base64::engine::general_purpose::STANDARD.encode(body));
+                                }
+                                Err(_) => value[&status] = json!(false),
+                            }
+                        }
+                        size += bytes_in_snapshot;
+                        if size > LIMIT {
+                            return Err(Error::new(413, "Capture snapshots exceed 16 MiB; save fewer captures at a time"));
+                        }
+                        sessions.push(value);
+                    }
+                    Ok(json_reply(200, json!({"sessions": sessions})))
+                }
                 ("POST", path) if path.starts_with("/ui-operations/") => {
                     let input = self.read_json(&mut request).await?;
                     Ok(json_reply(
@@ -1471,7 +1520,14 @@ impl Engine {
                     let input = self.read_json(&mut request).await?;
                     Ok(json_reply(200, crate::rules::preview_edit(input)?))
                 }
-                ("GET", "/breakpoints") => Ok(json_reply(200, self.rules.pending())),
+                ("GET", "/breakpoints") => {
+                    let summary = url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+                        .any(|(key, value)| key == "summary" && value == "1");
+                    Ok(json_reply(200, if summary { self.rules.pending_summary() } else { self.rules.pending() }))
+                }
+                ("GET", path) if path.starts_with("/breakpoints/") => {
+                    Ok(json_reply(200, self.rules.pending_detail(path.trim_start_matches("/breakpoints/"))?))
+                }
                 ("POST", path) if path.starts_with("/breakpoints/") => {
                     let id = path.trim_start_matches("/breakpoints/");
                     let input = self.read_json(&mut request).await?;
@@ -1718,7 +1774,11 @@ impl Engine {
         .await;
         result.unwrap_or_else(error_reply)
     }
-    async fn read_json(&self, request: &mut Request<Incoming>) -> Result<Value> {
+    async fn read_json<B>(&self, request: &mut Request<B>) -> Result<Value>
+    where
+        B: HttpBody<Data = Bytes> + Unpin,
+        B::Error: std::fmt::Display,
+    {
         let content_type = request
             .headers()
             .get("content-type")

@@ -113,7 +113,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub id: String,
@@ -220,14 +220,27 @@ impl History {
         self.search(offset, limit, "")
     }
     pub fn search(&self, offset: usize, limit: usize, query: &str) -> Result<Vec<Session>> {
+        self.map_search(offset, limit, query, None, |session| session)
+    }
+    pub fn map_search<T>(
+        &self,
+        offset: usize,
+        limit: usize,
+        query: &str,
+        group: Option<&str>,
+        mut project: impl FnMut(Session) -> T,
+    ) -> Result<Vec<T>> {
         // shortcut: substring search scans saved previews; use an FTS index if large histories stall capture.
         let mut statement = self.db.prepare(
-            "SELECT document FROM sessions WHERE ?1 = '' OR instr(lower(document), lower(?1)) > 0 ORDER BY started_at DESC, rowid DESC LIMIT ?2 OFFSET ?3",
+            "SELECT document FROM sessions WHERE (?1 = '' OR instr(lower(document), lower(?1)) > 0) AND (?4 IS NULL OR COALESCE(NULLIF(json_extract(document, '$.captureGroup'), ''), 'default') = ?4) ORDER BY started_at DESC, rowid DESC LIMIT ?2 OFFSET ?3",
         )?;
-        let rows = statement.query_map(params![query, limit as i64, offset as i64], |row| {
-            row.get::<_, String>(0)
-        })?;
-        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+        let mut rows = statement.query(params![query, limit as i64, offset as i64, group])?;
+        let mut result = Vec::with_capacity(limit);
+        while let Some(row) = rows.next()? {
+            let document = row.get_ref(0)?.as_str().map_err(crate::wire::Error::bad)?;
+            result.push(project(serde_json::from_str(document)?));
+        }
+        Ok(result)
     }
     pub fn insert(&mut self, session: &Session) {
         if let Err(error) = self.prune() {
@@ -276,6 +289,51 @@ impl History {
         self.revision += 1;
         self.session_revisions.clear();
         self.volatile_bodies.clear();
+    }
+    pub fn clear_group(&mut self, group: &str) {
+        self.sessions.retain(|session| {
+            let remove = session.capture_group == group
+                || (group == "default" && session.capture_group.is_empty());
+            if remove {
+                self.session_revisions.remove(&session.id);
+            }
+            !remove
+        });
+        self.volatile_bodies
+            .retain(|(id, _), _| self.session_revisions.contains_key(id));
+        self.revision += 1;
+    }
+    pub fn import_records(
+        &mut self,
+        items: Vec<(Session, Option<Vec<u8>>, Option<Vec<u8>>)>,
+    ) -> Result<()> {
+        let mut written = Vec::new();
+        let result = (|| -> Result<()> {
+            for (row, request, response) in &items {
+                for (phase, body) in [("request", request), ("response", response)] {
+                    if let Some(body) = body {
+                        let path = self.body_path(&row.id, phase);
+                        atomic_write(&path, body)?;
+                        written.push(path);
+                    }
+                }
+            }
+            let txn = self.db.transaction()?;
+            for (row, _, _) in &items {
+                txn.execute(
+                    "INSERT INTO sessions(id, started_at, document) VALUES (?, ?, ?)",
+                    params![row.id, row.started_at, serde_json::to_string(row)?],
+                )?;
+            }
+            txn.commit()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            for path in written {
+                let _ = fs::remove_file(path);
+            }
+        }
+        result
     }
     pub fn clear(&mut self) -> Result<()> {
         self.db.execute_batch("DELETE FROM sessions; PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;

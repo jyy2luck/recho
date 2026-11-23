@@ -8,7 +8,9 @@
     "text_and_hex_scroll_to_tail": true,
     "quick_filters": true,
     "pause_resume": true,
-    "clear_preserves_history": true
+    "clear_preserves_history": true,
+    "keyboard_detail_and_cross_viewport": true,
+    "independent_capture_tabs_and_history": true
   },
   "workload": {
     "sequential_posts": 200,
@@ -18,15 +20,15 @@
   },
   "clean_shutdown": true,
   "empty": {
-    "footprint_mib": 124.99,
-    "rss_mib": 115.06,
+    "footprint_mib": 146.44,
+    "rss_mib": 122.08,
     "cpu_percent_one_core": 0.0
   },
   "loaded": {
-    "footprint_mib": 186.92,
-    "rss_mib": 154.97,
+    "footprint_mib": 189.44,
+    "rss_mib": 163.16,
     "cpu_percent_one_core": 0.0
   },
-  "sampled_peak_footprint_mib": 201.95,
-  "executable_bytes": 15618672
+  "sampled_peak_footprint_mib": 211.88,
+  "executable_bytes": 16544080
 }

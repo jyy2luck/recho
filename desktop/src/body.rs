@@ -136,3 +136,136 @@ mod tests {
         );
     }
 }
+
+pub fn show_structured(ui: &mut eframe::egui::Ui, value: &serde_json::Value, tree: bool) {
+    use eframe::egui;
+    if tree {
+        let mut budget = 400;
+        egui::ScrollArea::both()
+            .id_salt("json_tree")
+            .show(ui, |ui| {
+                tree_node(ui, "$", value, &mut budget);
+                if budget == 0 {
+                    ui.weak("当前展开的节点已达上限，折叠分支后可查看其他内容。");
+                }
+            });
+        return;
+    }
+
+    // Cache one bounded pretty print per inspector instead of serializing for every repaint.
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    use std::sync::Arc;
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    let digest = hasher.finish();
+    let slot = ui.id().with("formatted_json");
+    let cached = ui.data_mut(|data| data.get_temp::<(u64, Arc<Content>)>(slot));
+    let content = match cached {
+        Some((previous, content)) if previous == digest => content,
+        _ => {
+            let mut buffer = CappedJson(Vec::new());
+            if serde_json::to_writer_pretty(&mut buffer, value).is_err() {
+                ui.weak("格式化视图超过 1 MiB，请切换到树或原始正文。");
+                return;
+            }
+            let content = Arc::new(Content::new(buffer.0));
+            ui.data_mut(|data| data.insert_temp(slot, (digest, content.clone())));
+            content
+        }
+    };
+    if let Content::Text { text, index } = content.as_ref() {
+        let height = ui.text_style_height(&egui::TextStyle::Monospace);
+        egui::ScrollArea::both()
+            .id_salt("pretty_json")
+            .auto_shrink([false, false])
+            .show_rows(ui, height, index.count, |ui, range| {
+                for row in index.rows(text, range) {
+                    let label = egui::RichText::new(row.trim_end_matches(['\r', '\n'])).monospace();
+                    ui.add(egui::Label::new(label).extend());
+                }
+            });
+    }
+}
+
+struct CappedJson(Vec<u8>);
+impl std::io::Write for CappedJson {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.0.len() + buffer.len() > 1024 * 1024 {
+            return Err(std::io::Error::other("Formatted JSON size limit"));
+        }
+        self.0.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn tree_node(ui: &mut eframe::egui::Ui, name: &str, value: &serde_json::Value, budget: &mut usize) {
+    use eframe::egui;
+    use serde_json::Value;
+    if *budget == 0 {
+        return;
+    }
+    *budget -= 1;
+    let bound = |text: &str| text.floor_char_boundary(240);
+    let label = if name.len() > 240 {
+        format!("{}…", &name[..bound(name)])
+    } else {
+        name.into()
+    };
+    let count = match value {
+        Value::Object(entries) => Some((entries.len(), "{…}")),
+        Value::Array(entries) => Some((entries.len(), "[…]")),
+        _ => None,
+    };
+    ui.push_id(name, |ui| {
+        if let Some((size, kind)) = count {
+            egui::CollapsingHeader::new(format!("{label}  {kind}  ({size})"))
+                .default_open(name == "$")
+                .show(ui, |ui| match value {
+                    Value::Object(entries) => {
+                        for (key, child) in entries {
+                            if *budget == 0 {
+                                break;
+                            }
+                            tree_node(ui, key, child, budget);
+                        }
+                    }
+                    Value::Array(entries) => {
+                        for (index, child) in entries.iter().enumerate() {
+                            if *budget == 0 {
+                                break;
+                            }
+                            tree_node(ui, &index.to_string(), child, budget);
+                        }
+                    }
+                    _ => {}
+                });
+        } else {
+            let rendered = if let Value::String(text) = value {
+                if text.len() > 240 {
+                    format!("{:?}…", &text[..bound(text)])
+                } else {
+                    format!("{text:?}")
+                }
+            } else {
+                value.to_string()
+            };
+            let colors = crate::theme::Theme::current(ui.ctx()).palette();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{label}:"))
+                        .monospace()
+                        .color(colors.key),
+                );
+                let text = egui::RichText::new(rendered).monospace();
+                ui.label(if value.is_string() {
+                    text.color(colors.string)
+                } else {
+                    text
+                });
+            });
+        }
+    });
+}

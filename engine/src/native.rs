@@ -1,6 +1,22 @@
 //! Typed access for the in-process desktop client; the control API remains available.
 use super::*;
 
+#[path = "capture_conditions.rs"]
+mod capture_conditions;
+#[path = "har.rs"]
+mod har;
+pub use capture_conditions::{Condition, ConditionSet, Field, Operator};
+
+pub fn write_local_file(path: &std::path::Path, bytes: &[u8]) -> std::result::Result<(), String> {
+    crate::storage::atomic_write(path, bytes).map_err(|error| error.to_string())
+}
+
+pub fn parse_header_lines(text: &str) -> std::result::Result<Value, String> {
+    wire::parse_headers(text)
+        .and_then(|headers| Ok(serde_json::to_value(headers)?))
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Phase {
     Request,
@@ -16,7 +32,7 @@ impl Phase {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Row {
     pub id: String,
     pub method: String,
@@ -30,6 +46,10 @@ pub struct Row {
     pub protocol: String,
     pub content_type: String,
     pub error: Option<String>,
+    pub group: String,
+    pub started_at: String,
+    pub incognito: bool,
+    pub list_matches: BTreeMap<String, bool>,
 }
 impl From<&crate::storage::Session> for Row {
     fn from(session: &crate::storage::Session) -> Self {
@@ -61,6 +81,14 @@ impl From<&crate::storage::Session> for Row {
                 })
                 .unwrap_or_default(),
             error: session.error.clone(),
+            group: if session.capture_group.is_empty() {
+                "default".into()
+            } else {
+                session.capture_group.clone()
+            },
+            started_at: session.started_at.clone(),
+            incognito: session.incognito,
+            list_matches: session.capture_list_matches.clone(),
         }
     }
 }
@@ -72,6 +100,9 @@ pub struct Snapshot {
     pub port: u16,
     pub intercept_tls: bool,
     pub history_error: Option<String>,
+    pub group: String,
+    pub incognito: bool,
+    pub enabled_list_filters: Vec<String>,
 }
 
 pub struct Detail {
@@ -87,7 +118,12 @@ pub struct DesktopEngine {
     running: Running,
 }
 impl DesktopEngine {
-    pub async fn start(directory: PathBuf, port: u16) -> std::result::Result<Self, String> {
+    pub async fn start(
+        directory: PathBuf,
+        port: impl Into<Option<u16>>,
+    ) -> std::result::Result<Self, String> {
+        let settings = crate::settings::SettingsStore::open(&directory);
+        let port = port.into().or(settings.snapshot().proxy_port).unwrap_or(0);
         start_embedded(
             directory,
             Some(port),
@@ -102,10 +138,51 @@ impl DesktopEngine {
         self.running.engine.authority.ca_path.clone()
     }
 
+    /// Trusted desktop calls reuse the same validation and handlers as the authenticated HTTP API.
+    pub async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> std::result::Result<Value, String> {
+        let result = async {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(full(Bytes::from(serde_json::to_vec(&body)?)))
+                .map_err(Error::bad)?;
+            let response = self.running.engine.clone().control_local(request).await;
+            let status = response.status();
+            let bytes = response.into_body().collect().await?.to_bytes();
+            let value: Value = serde_json::from_slice(&bytes)?;
+            if status.is_success() {
+                Ok(value)
+            } else {
+                Err(Error::new(
+                    status.as_u16(),
+                    value["error"].as_str().unwrap_or("Request failed"),
+                ))
+            }
+        };
+        result
+            .await
+            .map_err(|error| format!("{}: {}", error.status, error.message))
+    }
+
+    pub fn pending_breakpoints(&self) -> Value {
+        self.running.engine.rules.pending_summary()
+    }
+
+    pub fn pending_workspace_operations(&self) -> Value {
+        self.running.engine.ui.pending()
+    }
+
     pub async fn snapshot(&self, revision: Option<u64>) -> Snapshot {
         let engine = &self.running.engine;
         let proxy = engine.proxy.lock().await;
         let history = engine.history.lock().unwrap();
+        let settings = engine.settings.snapshot();
         Snapshot {
             revision: history.revision,
             rows: (revision != Some(history.revision))
@@ -114,7 +191,35 @@ impl DesktopEngine {
             port: proxy.port,
             intercept_tls: proxy.intercept,
             history_error: history.error.clone(),
+            group: settings.capture_group,
+            incognito: settings.incognito,
+            enabled_list_filters: history
+                .capture_list_filters
+                .items
+                .iter()
+                .filter(|filter| filter.enabled)
+                .map(|filter| filter.id.clone())
+                .collect(),
         }
+    }
+
+    pub fn history_rows(
+        &self,
+        offset: usize,
+        limit: usize,
+        query: &str,
+        group: Option<&str>,
+    ) -> std::result::Result<Vec<Row>, String> {
+        if !(1..=200).contains(&limit) || offset > i64::MAX as usize {
+            return Err("Invalid history pagination".into());
+        }
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .map_search(offset, limit, query, group, |session| Row::from(&session))
+            .map_err(|error| error.to_string())
     }
 
     pub async fn configure(
@@ -131,6 +236,16 @@ impl DesktopEngine {
 
     pub fn clear(&self) -> std::result::Result<(), String> {
         self.running.engine.history.lock().unwrap().clear_live();
+        Ok(())
+    }
+
+    pub fn clear_group(&self, group: &str) -> std::result::Result<(), String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .clear_group(group);
         Ok(())
     }
 

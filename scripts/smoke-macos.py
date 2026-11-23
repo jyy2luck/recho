@@ -175,6 +175,10 @@ try:
     binary_tail = f"{(len(binary) - 1) // 16 * 16:08x}  "
     wait_for(lambda: binary_tail in tree())
     screenshot("binary-tail")
+    ui("key", 126)  # Up selects the previous capture and updates the open details.
+    wait_for(lambda: tree().count(gzip_url) >= 2)
+    ui("key", 125)
+    wait_for(lambda: tree().count(binary_url) >= 2)
     ui("click-text", "■  停止")
     wait_for(lambda: not api("/state")["running"])
     ui("click-text", "▶  调试")
@@ -200,6 +204,34 @@ try:
     screenshot("loaded200")
     assert database.execute("SELECT count(*) FROM sessions").fetchone()[0] == 203
     report["workload"] = {"sequential_posts": 200, "request_and_response_bytes_each": len(payload), "spacing_ms": 30, "stable_window_seconds": 3}
+    phase = "keyboard"
+    first = f"http://127.0.0.1:{origin.server_port}/load/0"
+    ui("double-click-text", first)
+    wait_for(lambda: tree().count(first + '"') >= 2)
+    for _ in range(35):
+        ui("key", 125)
+    target = f"http://127.0.0.1:{origin.server_port}/load/35"
+    wait_for(lambda: tree().count(target + '"') >= 2)
+    screenshot("keyboard-scrolled")
+    report["native"]["keyboard_detail_and_cross_viewport"] = True
+    ui("click-text", "＋")
+    wait_for(lambda: "新建调试会话" in tree())
+    ui("click-text", "新建调试会话")
+    wait_for(lambda: api("/settings")["captureGroup"] != "default")
+    group = api("/settings")["captureGroup"]
+    proxy("/second-space", b"independent capture")
+    second = f"http://127.0.0.1:{origin.server_port}/second-space"
+    wait_for(lambda: second in tree() and target not in tree())
+    ui("click-text", "调试")
+    wait_for(lambda: api("/settings")["captureGroup"] == "default")
+    wait_for(lambda: "共 200 项" in tree() and second not in tree())
+    ui("click-text", "调试 2")
+    wait_for(lambda: api("/settings")["captureGroup"] == group)
+    wait_for(lambda: second in tree())
+    ui("key", 118)  # F4 opens persisted history, including the previously cleared rows.
+    wait_for(lambda: "第 1 页" in tree())
+    assert any(row["url"] == url for row in api(f"/history?query=127.0.0.1:{origin.server_port}/plain"))
+    report["native"]["independent_capture_tabs_and_history"] = True
     phase = "shutdown"
     ui("close")
     app.wait(timeout=10)
