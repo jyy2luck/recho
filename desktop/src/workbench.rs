@@ -1319,13 +1319,20 @@ mod selection_tests {
 
 fn details(app: &mut Recho, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
-        ui.label("详情");
-        if ui.small_button("重新读取").clicked() {
-            app.select(app.selected.clone());
-        }
+        ui.strong("详情");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.small_button("×").on_hover_text("关闭详情").clicked() {
+            if ui
+                .add(egui::Button::new("×").frame_when_inactive(false))
+                .on_hover_text("关闭详情")
+                .clicked()
+            {
                 app.details_open = false;
+            }
+            if ui
+                .add(egui::Button::new("重新读取").frame_when_inactive(false))
+                .clicked()
+            {
+                app.select(app.selected.clone());
             }
         });
     });
@@ -1371,17 +1378,24 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         );
     });
     ui.separator();
-    ui.add(
-        egui::Label::new(if request {
-            row.url.clone()
-        } else {
-            format!(
-                "{}       {} ms       {} bytes",
-                row.status, row.duration_ms, row.response_bytes
-            )
-        })
-        .truncate(),
-    );
+    if request {
+        ui.add(egui::Label::new(&row.url).truncate());
+    } else {
+        ui.horizontal(|ui| {
+            ui.colored_label(
+                if row.error.is_some() || row.status >= 400 {
+                    colors.red
+                } else {
+                    colors.green
+                },
+                row.status.to_string(),
+            );
+            ui.separator();
+            ui.weak(format!("{} ms", row.duration_ms));
+            ui.separator();
+            ui.weak(format!("{} bytes", row.response_bytes));
+        });
+    }
     if let Some(error) = &row.error {
         ui.colored_label(colors.red, error);
     }
@@ -1429,26 +1443,50 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
             });
         return;
     }
-    ui.horizontal(|ui| {
-        ui.add_enabled_ui(matches!(viewer.content, Content::Text { .. }), |ui| {
-            ui.selectable_value(&mut panel.format, BodyFormat::Raw, "Raw");
-            ui.selectable_value(&mut panel.format, BodyFormat::Json, "JSON");
-            ui.selectable_value(&mut panel.format, BodyFormat::Tree, "Tree");
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(2, 3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                let is_text = matches!(viewer.content, Content::Text { .. });
+                for (format, label) in [
+                    (BodyFormat::Raw, "Raw"),
+                    (BodyFormat::Json, "JSON"),
+                    (BodyFormat::Tree, "Tree"),
+                    (BodyFormat::Hex, "Hex"),
+                ] {
+                    if ui
+                        .add_enabled(
+                            is_text || format == BodyFormat::Hex,
+                            egui::Button::selectable(panel.format == format, label)
+                                .min_size(egui::vec2(38.0, 27.0)),
+                        )
+                        .clicked()
+                    {
+                        panel.format = format;
+                    }
+                }
+                if let Content::Text { text, .. } = &viewer.content {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = if viewer.detail.notice.is_none() {
+                            "复制完整正文"
+                        } else {
+                            "复制预览"
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(label)
+                                    .min_size(egui::vec2(0.0, 27.0))
+                                    .frame_when_inactive(false),
+                            )
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(text.clone());
+                        }
+                    });
+                }
+            });
         });
-        ui.selectable_value(&mut panel.format, BodyFormat::Hex, "Hex");
-        if let Content::Text { text, .. } = &viewer.content {
-            if ui
-                .small_button(if viewer.detail.notice.is_none() {
-                    "复制完整正文"
-                } else {
-                    "复制预览"
-                })
-                .clicked()
-            {
-                ui.ctx().copy_text(text.clone());
-            }
-        }
-    });
     if let Some(notice) = &viewer.detail.notice {
         ui.colored_label(colors.warning, notice);
     }
