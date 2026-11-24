@@ -2,4 +2,6 @@
 /dist/
 /research/evidence/
 .DS_Store
-/.agents/skills/huashu-design/
+/.agents/
+/.specify/
+/design-demos/
