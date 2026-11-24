@@ -209,6 +209,8 @@ struct SaveTab {
     name: String,
     folder: String,
 }
+const CLIPBOARD_IMPORT: &str = "从剪贴板导入";
+
 struct Transfer {
     kind: &'static str,
     text: String,
@@ -487,6 +489,15 @@ impl Composer {
     }
     pub(super) fn open_protobuf(&mut self) {
         self.add(draft("protobuf"));
+    }
+    pub(super) fn import_clipboard(&mut self, ctx: &egui::Context) {
+        self.transfer = Some(Transfer {
+            kind: CLIPBOARD_IMPORT,
+            text: String::new(),
+            target: None,
+            error: None,
+        });
+        ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
     }
     pub(super) fn workspace_operation_once(
         &mut self,
@@ -1412,6 +1423,18 @@ impl Composer {
             }
         }
         if let Some(mut item) = self.transfer.take() {
+            if item.kind == CLIPBOARD_IMPORT && item.text.is_empty() {
+                ctx.input_mut(|input| {
+                    if let Some(index) = input
+                        .events
+                        .iter()
+                        .position(|event| matches!(event, egui::Event::Paste(_)))
+                        && let egui::Event::Paste(text) = input.events.remove(index)
+                    {
+                        item.text = text;
+                    }
+                });
+            }
             let mut open = true;
             let mut parsed = None;
             let mut cancel = false;
@@ -1420,19 +1443,24 @@ impl Composer {
                 .collapsible(false)
                 .default_width(580.0)
                 .show(ctx, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut item.text)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(8),
-                    );
+                    let mut editor = egui::TextEdit::multiline(&mut item.text)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(8);
+                    if item.kind == CLIPBOARD_IMPORT {
+                        editor = editor.hint_text("粘贴 cURL 命令或 Recho 请求 JSON");
+                    }
+                    ui.add(editor);
                     if let Some(error) = &item.error {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("导入").clicked() {
-                            let result = if item.kind == "导入 cURL" {
-                                request_from_curl(item.text.trim())
+                            let source = item.text.trim();
+                            let result = if item.kind == "导入 cURL"
+                                || (item.kind == CLIPBOARD_IMPORT && !source.starts_with('{'))
+                            {
+                                request_from_curl(source)
                             } else {
                                 serde_json::from_str(&item.text)
                                     .map_err(|error| error.to_string())

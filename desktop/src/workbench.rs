@@ -2,6 +2,9 @@ use super::*;
 use crate::certificate_ui::Page as CertificatePage;
 use egui_extras::{Column, TableBuilder};
 
+const NEW_HTTP: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::T);
+
 pub(super) fn icon(code: &str) -> RichText {
     RichText::new(code).font(egui::FontId::new(
         19.0,
@@ -85,7 +88,10 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             }
         }
     }
-    if ui.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) && app.ready
+    if ui.input_mut(|input| {
+        input.consume_key(egui::Modifiers::COMMAND, egui::Key::N)
+            || (!cfg!(target_os = "macos") && input.consume_shortcut(&NEW_HTTP))
+    }) && app.ready
     {
         app.composer.open_new();
         if app.navigation == Navigation::History {
@@ -410,46 +416,63 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                     ui.horizontal(|ui| {
                         capture_tabs(app, ui);
                         app.composer.show_tabs(ui, &app.worker);
-                        ui.add_enabled_ui(app.ready, |ui| {
-                            ui.menu_button("＋", |ui| {
-                                if ui.button("新建调试会话").clicked() {
-                                    app.navigate(Navigation::Capture);
-                                    app.composer.show_capture();
-                                    app.new_capture_space();
-                                    ui.close();
-                                }
-                                if ui.button("导入 HAR").clicked() {
-                                    app.choose_har(ui.ctx(), false);
-                                    ui.close();
-                                }
-                                if ui.button("HTTP 请求").clicked() {
+                        let add = ui.add_enabled(
+                            app.ready,
+                            egui::Button::new("＋").min_size(egui::vec2(30.0, 30.0)),
+                        );
+                        action_menu(
+                            egui::Popup::menu(&add)
+                                .id(ui.make_persistent_id("new_workbench_tab"))
+                                .gap(4.0),
+                            |ui| {
+                                let shortcut = ui.ctx().format_shortcut(&NEW_HTTP);
+                                if ui
+                                    .add(egui::Button::new("新建 HTTP").shortcut_text(shortcut))
+                                    .clicked()
+                                {
                                     if app.navigation == Navigation::History {
                                         app.navigate(Navigation::Capture);
                                     }
                                     app.composer.open_new();
                                     ui.close();
                                 }
-                                if ui.button("原始 HTTP 请求").clicked() {
+                                if menu_item(ui, "新建 HTTP 报文", true) {
                                     if app.navigation == Navigation::History {
                                         app.navigate(Navigation::Capture);
                                     }
                                     app.composer.open_raw();
                                     ui.close();
                                 }
-                                if ui.button("WebSocket 请求").clicked() {
+                                if menu_item(ui, "新建 WebSocket", true) {
                                     app.composer.open_websocket();
                                     ui.close();
                                 }
-                                if ui.button("gRPC 请求").clicked() {
+                                if menu_item(ui, "新建 gRPC", true) {
                                     app.composer.open_grpc();
                                     ui.close();
                                 }
-                                if ui.button("Protobuf 规范").clicked() {
-                                    app.composer.open_protobuf();
+                                ui.menu_button("新建规范文件", |ui| {
+                                    ui.set_width(120.0);
+                                    ui.spacing_mut().interact_size.y = 26.0;
+                                    if menu_item(ui, "Protobuf", true) {
+                                        app.composer.open_protobuf();
+                                        ui.close();
+                                    }
+                                });
+                                ui.separator();
+                                if menu_item(ui, "新建临时捕获", true) {
+                                    app.navigate(Navigation::Capture);
+                                    app.composer.show_capture();
+                                    app.new_capture_space();
                                     ui.close();
                                 }
-                            });
-                        });
+                                ui.separator();
+                                if menu_item(ui, "从剪贴板导入", true) {
+                                    app.composer.import_clipboard(ui.ctx());
+                                    ui.close();
+                                }
+                            },
+                        );
                     })
                 });
             ui.separator();

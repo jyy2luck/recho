@@ -215,8 +215,8 @@ try:
     screenshot("keyboard-scrolled")
     report["native"]["keyboard_detail_and_cross_viewport"] = True
     ui("click-text", "＋")
-    wait_for(lambda: "新建调试会话" in tree())
-    ui("click-text", "新建调试会话")
+    wait_for(lambda: "新建临时捕获" in tree())
+    ui("click-text", "新建临时捕获")
     wait_for(lambda: api("/settings")["captureGroup"] != "default")
     group = api("/settings")["captureGroup"]
     proxy("/second-space", b"independent capture")
