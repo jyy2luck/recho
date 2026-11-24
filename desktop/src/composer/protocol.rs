@@ -241,7 +241,7 @@ impl Protocol {
             });
             ui.separator();
             if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             let height = (ui.available_height() * 0.58).max(180.0);
             egui::Panel::top("protocol_inputs")

@@ -65,8 +65,12 @@ impl Preview {
     }
 
     fn show(&self, ui: &mut egui::Ui, colors: bool) {
+        let palette = crate::theme::Theme::current_palette(ui.ctx());
         if self.partial {
-            ui.colored_label(egui::Color32::YELLOW, "包含不完整正文，仅显示已保存内容。");
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "包含不完整正文，仅显示已保存内容。",
+            );
         }
         egui::ScrollArea::both()
             .id_salt("library_message")
@@ -76,8 +80,8 @@ impl Preview {
                         egui::RichText::new(line.trim_end_matches(['\r', '\n'])).monospace();
                     if colors {
                         text = match line.as_bytes().first() {
-                            Some(b'+') => text.color(egui::Color32::LIGHT_GREEN),
-                            Some(b'-') => text.color(egui::Color32::LIGHT_RED),
+                            Some(b'+') => text.color(palette.green),
+                            Some(b'-') => text.color(palette.red),
                             _ => text,
                         };
                     }
@@ -346,7 +350,7 @@ impl LibraryUi {
             }
         });
         if let Some(error) = &self.error {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         let Some(archive) = &self.archive else {
             if self.reply.is_some() {
@@ -587,7 +591,7 @@ impl LibraryUi {
                 }
             };
             if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             ui.horizontal(|ui| {
                 (

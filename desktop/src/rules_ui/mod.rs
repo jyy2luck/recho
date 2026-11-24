@@ -331,7 +331,7 @@ impl RulesUi {
             .into_iter()
             .flatten()
         {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         ui.separator();
         if self.rules.is_none() {

@@ -53,7 +53,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     }
     #[cfg(target_os = "macos")]
     crate::native_menu::show(app, ui);
-    let colors = app.theme.palette();
+    let colors = app.theme.palette(ui.ctx());
     #[cfg(not(target_os = "macos"))]
     egui::Panel::top("menus")
         .frame(
@@ -116,12 +116,29 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                         app.load_details();
                     }
                     ui.menu_button("主题", |ui| {
-                        for theme in theme::Theme::ALL {
+                        for (color, label) in theme::ThemeColor::OPTIONS {
                             if ui
-                                .selectable_label(app.theme == theme, theme.name())
+                                .selectable_label(app.theme.color == color, label)
                                 .clicked()
                             {
-                                app.set_theme(theme, ui.ctx());
+                                app.set_theme(theme::Theme { color, ..app.theme }, ui.ctx());
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("外观", |ui| {
+                        for (appearance, label) in theme::Appearance::OPTIONS {
+                            if ui
+                                .selectable_label(app.theme.appearance == appearance, label)
+                                .clicked()
+                            {
+                                app.set_theme(
+                                    theme::Theme {
+                                        appearance,
+                                        ..app.theme
+                                    },
+                                    ui.ctx(),
+                                );
                                 ui.close();
                             }
                         }
@@ -589,7 +606,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
 }
 
 fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
-    let colors = app.theme.palette();
+    let colors = app.theme.palette(ui.ctx());
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(14, 14))
         .show(ui, |ui| {
@@ -764,7 +781,7 @@ fn copy_url(app: &Recho, ui: &egui::Ui) {
     }
 }
 fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
-    let colors = app.theme.palette();
+    let colors = app.theme.palette(ui.ctx());
     if app.spaces.items.is_empty() {
         ui.weak("调试");
         return;
@@ -865,7 +882,7 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
 }
 
 fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
-    let colors = app.theme.palette();
+    let colors = app.theme.palette(ui.ctx());
     let history = app.navigation == Navigation::History;
     if history && app.history_rows.is_empty() {
         return;
@@ -1226,7 +1243,7 @@ fn details(app: &mut Recho, ui: &mut egui::Ui) {
     message(app, ui, 1);
 }
 fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
-    let colors = app.theme.palette();
+    let colors = app.theme.palette(ui.ctx());
     let request = index == 0;
     let rows = if app.navigation == Navigation::History {
         &app.history_rows
@@ -1563,8 +1580,13 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
             });
         app.connection_open = open;
     }
-    app.certificates
-        .show(ctx, app.theme.palette(), app.port, app.running, app.ready);
+    app.certificates.show(
+        ctx,
+        app.theme.palette(ctx),
+        app.port,
+        app.running,
+        app.ready,
+    );
     if app.confirm_proxy_auto {
         let modal = egui::Modal::new(egui::Id::new("proxy_auto_confirmation")).show(ctx, |ui| {
             ui.set_width(400.0);

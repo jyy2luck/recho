@@ -244,7 +244,7 @@ impl RuleEditor {
                 });
             ui.separator();
             if let Some(error) = self.error.as_deref().or(state.source_error) {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             if self.cancel {
                 ui.label("放弃未保存的修改？");
@@ -689,7 +689,7 @@ impl ActionEditor {
                             ui.monospace(text);
                         }
                         Err(error) => {
-                            ui.colored_label(egui::Color32::LIGHT_RED, error);
+                            ui.colored_label(ui.visuals().error_fg_color, error);
                         }
                     }
                 }

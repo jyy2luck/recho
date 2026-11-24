@@ -86,12 +86,12 @@ impl Breakpoint {
                 ui.weak(format!("到期时间 {}", label(&self.summary["expiresAt"])));
                 if !live {
                     ui.colored_label(
-                        egui::Color32::YELLOW,
+                        ui.visuals().warn_fg_color,
                         "断点已失效，请求已结束、取消或超时。",
                     );
                 }
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 ui.separator();
                 if let Some(message) = &mut self.draft {

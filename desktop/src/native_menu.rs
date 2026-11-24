@@ -1,4 +1,9 @@
-use super::{Navigation, Recho, platform::ProxyProtocol, theme::Theme, worker::Command};
+use super::{
+    Navigation, Recho,
+    platform::ProxyProtocol,
+    theme::{Appearance, Theme, ThemeColor},
+    worker::Command,
+};
 use crate::{certificate_ui::Page as CertificatePage, platform::CertificateFormat};
 use crate::{network_ui::NetworkSection, rules_ui::RuleCategory};
 use eframe::egui;
@@ -30,7 +35,8 @@ enum Action {
     McpTokens,
     Sidebar,
     Details,
-    Theme(Theme),
+    ThemeColor(ThemeColor),
+    Appearance(Appearance),
     ToggleCapture,
     Clear,
     Incognito,
@@ -179,8 +185,12 @@ fn install(mtm: MainThreadMarker, ctx: &egui::Context) -> Retained<RechoMenuTarg
     add(&view, "显示侧边栏", "", Action::Sidebar);
     add(&view, "显示详情", "", Action::Details);
     let themes = top(mtm, &view, "主题");
-    for theme in Theme::ALL {
-        add(&themes, theme.name(), "", Action::Theme(theme));
+    for (color, label) in ThemeColor::OPTIONS {
+        add(&themes, label, "", Action::ThemeColor(color));
+    }
+    let appearances = top(mtm, &view, "外观");
+    for (appearance, label) in Appearance::OPTIONS {
+        add(&appearances, label, "", Action::Appearance(appearance));
     }
     let debug = top(mtm, &menu, "调试");
     add(&debug, "启动调试", "g", Action::ToggleCapture);
@@ -291,7 +301,8 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             Action::Intercept => app.intercept_tls,
             Action::Sidebar => app.sidebar_visible,
             Action::Details => app.details_open,
-            Action::Theme(theme) => app.theme == *theme,
+            Action::ThemeColor(color) => app.theme.color == *color,
+            Action::Appearance(appearance) => app.theme.appearance == *appearance,
             Action::Incognito => app.spaces.incognito,
             _ => false,
         };
@@ -360,7 +371,14 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::Mcp => app.mcp.open(),
         Action::McpTokens => app.mcp.open_tokens(),
         Action::Sidebar => app.sidebar_visible = !app.sidebar_visible,
-        Action::Theme(theme) => app.set_theme(theme, ctx),
+        Action::ThemeColor(color) => app.set_theme(Theme { color, ..app.theme }, ctx),
+        Action::Appearance(appearance) => app.set_theme(
+            Theme {
+                appearance,
+                ..app.theme
+            },
+            ctx,
+        ),
         Action::Details => {
             app.details_open = !app.details_open;
             if app.details_open {

@@ -651,7 +651,7 @@ impl Composer {
     }
     fn archive_notice(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = &self.save_error {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
             if ui
                 .button(if self.document.is_some() {
                     "重试保存"
@@ -1039,11 +1039,11 @@ impl Composer {
                 ui.weak("正在读取捕获正文…");
             }
             if let Some(error) = self.errors.get(&self.active) {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                ui.colored_label(ui.visuals().error_fg_color, error);
             }
             if request["bodyIncomplete"] == true {
                 ui.colored_label(
-                    egui::Color32::YELLOW,
+                    ui.visuals().warn_fg_color,
                     "完整请求正文不可用。补全正文后才能发送。",
                 );
             }
@@ -1424,7 +1424,7 @@ impl Composer {
                             .desired_rows(8),
                     );
                     if let Some(error) = &item.error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, error);
+                        ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     ui.horizontal(|ui| {
                         if ui.button("导入").clicked() {
@@ -2025,7 +2025,7 @@ fn show_reply(ui: &mut egui::Ui, reply: &mut Reply, tab: &str) {
         text(summary, "protocol")
     ));
     if let Some(notice) = &reply.notice {
-        ui.colored_label(egui::Color32::YELLOW, notice);
+        ui.colored_label(ui.visuals().warn_fg_color, notice);
     }
     if tab != "响应体" {
         let values = match tab {

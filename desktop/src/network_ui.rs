@@ -219,7 +219,7 @@ impl NetworkUi {
             }
         });
         for error in [&self.source_error, &self.error].into_iter().flatten() {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
+            ui.colored_label(ui.visuals().error_fg_color, error);
         }
         let Some(settings) = &self.settings else {
             if self.reply.is_some() {
@@ -474,7 +474,7 @@ impl NetworkUi {
                     });
                 ui.separator();
                 if let Some(error) = self.source_error.as_ref().or(self.error.as_ref()) {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if edit.close_confirm {
                     ui.label("放弃未保存的修改？");

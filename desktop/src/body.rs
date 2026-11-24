@@ -252,7 +252,7 @@ fn tree_node(ui: &mut eframe::egui::Ui, name: &str, value: &serde_json::Value, b
             } else {
                 value.to_string()
             };
-            let colors = crate::theme::Theme::current(ui.ctx()).palette();
+            let colors = crate::theme::Theme::current_palette(ui.ctx());
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("{label}:"))
@@ -261,7 +261,7 @@ fn tree_node(ui: &mut eframe::egui::Ui, name: &str, value: &serde_json::Value, b
                 );
                 let text = egui::RichText::new(rendered).monospace();
                 ui.label(if value.is_string() {
-                    text.color(colors.string)
+                    text.color(colors.green)
                 } else {
                     text
                 });
