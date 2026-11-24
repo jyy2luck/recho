@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">Recho 应用图标 · 双向</title>
+  <defs>
+    <linearGradient id="plate" x2=".29" y2="1">
+      <stop stop-color="#225e4e"/>
+      <stop offset=".58" stop-color="#184537"/>
+      <stop offset="1" stop-color="#12382e"/>
+    </linearGradient>
+    <radialGradient id="light" cx=".48" cy=".34" r=".65">
+      <stop stop-color="#9fdeaa" stop-opacity=".17"/>
+      <stop offset="1" stop-color="#9fdeaa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x2="0" y2="1">
+      <stop stop-color="#9cbdab"/>
+      <stop offset="1" stop-color="#407263"/>
+    </linearGradient>
+    <linearGradient id="upper" x2=".05" y2="1">
+      <stop stop-color="#edffde"/>
+      <stop offset="1" stop-color="#b9e8ae"/>
+    </linearGradient>
+    <linearGradient id="lower" x2="0" y2="1">
+      <stop stop-color="#8cd4ac"/>
+      <stop offset="1" stop-color="#b8e4b6"/>
+    </linearGradient>
+    <path id="outline" d="M328 88H696C867 88 936 157 936 328V696C936 867 867 936 696 936H328C157 936 88 867 88 696V328C88 157 157 88 328 88Z"/>
+    <path id="rail" d="M258 453V417Q258 400 270 388L366 292Q378 280 395 280H697Q730 280 730 313V352Q730 385 697 385H432L370 447V531Q370 546 359 557L311 605Q289 627 268 605Q258 595 258 581Z"/>
+  </defs>
+  <use href="#outline" transform="translate(0 9)" fill="#09241c" opacity=".7"/>
+  <use href="#outline" fill="url(#plate)" stroke="url(#rim)" stroke-width="7"/>
+  <use href="#outline" fill="url(#light)"/>
+  <g transform="translate(0 4)" fill="#092c22" opacity=".47">
+    <use href="#rail" transform="translate(0 -13)"/>
+    <use href="#rail" transform="rotate(180 512 512) translate(0 -13)"/>
+  </g>
+  <use href="#rail" transform="rotate(180 512 512) translate(0 -13)" fill="url(#lower)"/>
+  <use href="#rail" transform="translate(0 -13)" fill="url(#upper)"/>
+</svg>
