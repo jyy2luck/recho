@@ -13,6 +13,8 @@ mod network_ui;
 mod platform;
 mod rules_ui;
 mod theme;
+#[cfg(windows)]
+mod title_bar;
 mod workbench;
 mod worker;
 
@@ -70,6 +72,8 @@ impl MessagePanel {
 }
 
 struct Recho {
+    #[cfg(windows)]
+    title_bar: title_bar::TitleBar,
     worker: Worker,
     theme: theme::Theme,
     theme_path: PathBuf,
@@ -134,7 +138,12 @@ struct Recho {
     history_error: Option<String>,
 }
 impl Recho {
-    fn new(cc: &eframe::CreationContext<'_>, directory: PathBuf, port: Option<u16>) -> Self {
+    fn new(
+        cc: &eframe::CreationContext<'_>,
+        directory: PathBuf,
+        port: Option<u16>,
+        #[cfg(windows)] title_bar: title_bar::TitleBar,
+    ) -> Self {
         let theme_path = directory.join("desktop-theme.json");
         let (theme, theme_error) = match theme::Theme::load(&theme_path) {
             Ok(theme) => (theme, None),
@@ -162,6 +171,8 @@ impl Recho {
             .insert(egui::FontFamily::Name("icons".into()), vec!["icons".into()]);
         cc.egui_ctx.set_fonts(fonts);
         Self {
+            #[cfg(windows)]
+            title_bar,
             theme,
             theme_path,
             spaces: capture_spaces::Spaces::new(directory.join("desktop-captures.json")),
@@ -847,13 +858,22 @@ fn main() -> eframe::Result {
     }
     let (directory, port) = options()
         .map_err(|error| eframe::Error::AppCreation(Box::new(std::io::Error::other(error))))?;
+    #[cfg(target_os = "windows")]
+    let icon = std::sync::Arc::new(
+        eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/recho.png"))
+            .expect("embedded Recho icon must be a valid PNG"),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let icon = std::sync::Arc::new(egui::IconData::default());
+
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("recho")
             .with_inner_size([1450.0, 900.0])
             .with_min_inner_size([1050.0, 600.0])
             .with_app_id("io.github.jyy2luck.recho")
-            .with_icon(egui::IconData::default()),
+            .with_decorations(!cfg!(windows))
+            .with_icon(icon.clone()),
         renderer: eframe::Renderer::Glow,
         multisampling: 0,
         depth_buffer: 0,
@@ -863,6 +883,16 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "recho",
         native,
-        Box::new(move |cc| Ok(Box::new(Recho::new(cc, directory, port)))),
+        Box::new(move |cc| {
+            #[cfg(windows)]
+            let title_bar = title_bar::TitleBar::attach(cc, &icon)?;
+            Ok(Box::new(Recho::new(
+                cc,
+                directory,
+                port,
+                #[cfg(windows)]
+                title_bar,
+            )))
+        }),
     )
 }

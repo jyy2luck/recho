@@ -2,7 +2,7 @@ use super::*;
 use crate::certificate_ui::Page as CertificatePage;
 use egui_extras::{Column, TableBuilder};
 
-fn icon(code: &str) -> RichText {
+pub(super) fn icon(code: &str) -> RichText {
     RichText::new(code).font(egui::FontId::new(
         19.0,
         egui::FontFamily::Name("icons".into()),
@@ -55,14 +55,29 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     crate::native_menu::show(app, ui);
     let colors = app.theme.palette(ui.ctx());
     #[cfg(not(target_os = "macos"))]
-    egui::Panel::top("menus")
+    let menus = egui::Panel::top("menus");
+    #[cfg(windows)]
+    let menus = menus.exact_size(crate::title_bar::HEIGHT);
+    #[cfg(not(target_os = "macos"))]
+    menus
         .frame(
             egui::Frame::new()
                 .fill(colors.chrome)
-                .inner_margin(egui::Margin::symmetric(8, 1)),
+                .inner_margin(if cfg!(windows) {
+                    egui::Margin::ZERO
+                } else {
+                    egui::Margin::symmetric(8, 1)
+                }),
         )
         .show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
+            #[cfg(windows)]
+            let row = ui.available_rect_before_wrap();
+            #[cfg(windows)]
+            let mut menu_ui = crate::title_bar::TitleBar::menu_ui(ui, row);
+            let draw_menus = |ui: &mut egui::Ui| {
+                #[cfg(windows)]
+                app.title_bar.icon(ui);
+                #[cfg(not(windows))]
                 ui.label(RichText::new("recho").strong().color(colors.accent));
                 ui.menu_button("文件", |ui| {
                     if ui
@@ -236,7 +251,16 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                     ui.label("recho 0.1.0 · Rust 桌面验证版");
                     ui.label("核心抓包流程已接入；灰色入口尚未迁移。");
                 });
-            });
+                #[cfg(windows)]
+                return ui.cursor().min.x;
+            };
+            #[cfg(windows)]
+            {
+                let menu = egui::MenuBar::new().ui(&mut menu_ui, draw_menus);
+                app.title_bar.show(ui, row, menu.inner);
+            }
+            #[cfg(not(windows))]
+            egui::MenuBar::new().ui(ui, draw_menus);
         });
     egui::Panel::bottom("status")
         .frame(
