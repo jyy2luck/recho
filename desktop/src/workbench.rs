@@ -1026,6 +1026,8 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.set_min_width(980.0);
             ui.visuals_mut().widgets.hovered.bg_fill = colors.chrome;
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color =
+                colors.bg.lerp_to_gamma(colors.line, 0.55);
             let cyan = if ui.visuals().dark_mode {
                 egui::Color32::from_rgb(107, 216, 225)
             } else {
@@ -1034,7 +1036,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
             let table = TableBuilder::new(ui)
                 .id_salt(("captures", history))
                 .resizable(true)
-                .striped(false)
+                .striped(true)
                 .sense(egui::Sense::click())
                 .auto_shrink([false, false])
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -1069,24 +1071,27 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                     .enumerate()
                     {
                         row.col(|ui| {
-                            if ui
-                                .selectable_label(
-                                    !history && app.sort_column == index,
-                                    format!(
-                                        "{title}{}",
-                                        if !history && app.sort_column == index {
-                                            if app.ascending { " ^" } else { " v" }
-                                        } else {
-                                            ""
-                                        }
-                                    ),
-                                )
-                                .clicked()
-                            {
-                                if !history {
-                                    sort = Some(index);
+                            capture_cell(ui, index, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        !history && app.sort_column == index,
+                                        RichText::new(format!(
+                                            "{title}{}",
+                                            if !history && app.sort_column == index {
+                                                if app.ascending { " ↑" } else { " ↓" }
+                                            } else {
+                                                ""
+                                            }
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .clicked()
+                                {
+                                    if !history {
+                                        sort = Some(index);
+                                    }
                                 }
-                            }
+                            })
                         });
                     }
                 })
@@ -1135,16 +1140,19 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         };
                         for (index, text) in cells.into_iter().enumerate() {
                             table_row.col(|ui| {
-                                let mut text =
-                                    RichText::new(text).size(12.0).color(if index == 5 {
-                                        color
-                                    } else {
-                                        marked_color.unwrap_or_else(|| ui.visuals().text_color())
-                                    });
-                                if highlight == Some("划线") {
-                                    text = text.strikethrough();
-                                }
-                                ui.add(egui::Label::new(text).truncate().selectable(false));
+                                capture_cell(ui, index, |ui| {
+                                    let mut text =
+                                        RichText::new(text).size(12.0).color(if index == 5 {
+                                            color
+                                        } else {
+                                            marked_color
+                                                .unwrap_or_else(|| ui.visuals().text_color())
+                                        });
+                                    if highlight == Some("划线") {
+                                        text = text.strikethrough();
+                                    }
+                                    ui.add(egui::Label::new(text).truncate().selectable(false));
+                                })
                             });
                         }
                         let response = table_row.response();
@@ -1260,6 +1268,21 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         app.network_open = false;
         app.rules.new_for_capture(category, &method, &url);
     }
+}
+
+fn capture_cell(ui: &mut egui::Ui, column: usize, contents: impl FnOnce(&mut egui::Ui)) {
+    let layout = match column {
+        0 | 1 | 5 => egui::Layout::top_down(egui::Align::Center)
+            .with_main_align(egui::Align::Center)
+            .with_main_justify(true),
+        7 | 8 => egui::Layout::right_to_left(egui::Align::Center),
+        _ => egui::Layout::left_to_right(egui::Align::Center),
+    };
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(7, 0))
+        .show(ui, |ui| {
+            ui.with_layout(layout, contents);
+        });
 }
 
 fn visible_rows(app: &Recho, history: bool) -> Vec<&Row> {
