@@ -41,6 +41,29 @@ pub(super) fn sidebar_row(
     )
 }
 
+fn action_menu(popup: egui::Popup<'_>, content: impl FnOnce(&mut egui::Ui)) {
+    let ctx = popup.ctx();
+    let colors = crate::theme::Theme::current_palette(ctx);
+    let frame = egui::Frame::popup(&ctx.style_of(ctx.theme()))
+        .inner_margin(5)
+        .corner_radius(7)
+        .fill(colors.side)
+        .stroke(egui::Stroke::new(1.0, colors.line));
+    popup.width(210.0).frame(frame).show(|ui| {
+        ui.set_min_width(198.0);
+        ui.spacing_mut().button_padding = egui::vec2(9.0, 4.0);
+        ui.spacing_mut().interact_size.y = 26.0;
+        ui.spacing_mut().item_spacing.y = 2.0;
+        content(ui);
+    });
+}
+
+fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
+    ui.add_enabled_ui(enabled, |ui| sidebar_row(ui, label, None))
+        .inner
+        .clicked()
+}
+
 pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     if ui
         .ctx()
@@ -866,20 +889,23 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
             )
             .min_size(egui::vec2(100.0, 30.0)),
         );
-        response.context_menu(|ui| {
-            ui.label("会话名称");
-            ui.add(egui::TextEdit::singleline(&mut space.name).char_limit(80));
-            if ui
-                .add_enabled(
-                    !current && id != "default",
-                    egui::Button::new("关闭会话标签"),
-                )
-                .clicked()
-            {
-                remove = Some(id.clone());
-                ui.close();
-            }
-        });
+        action_menu(
+            egui::Popup::context_menu(&response)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+            |ui| {
+                ui.label("会话名称");
+                ui.add(
+                    egui::TextEdit::singleline(&mut space.name)
+                        .desired_width(f32::INFINITY)
+                        .char_limit(80),
+                );
+                ui.separator();
+                if menu_item(ui, "关闭会话标签", !current && id != "default") {
+                    remove = Some(id.clone());
+                    ui.close();
+                }
+            },
+        );
         if response.clicked() {
             next = Some(id.clone());
         }
@@ -1166,55 +1192,59 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                             choose = Some((row.id.clone(), egui::Modifiers::NONE));
                             open = true;
                         }
-                        response.context_menu(|ui| {
-                            if ui.button("复制 cURL").clicked() {
-                                curl = Some(row.id.clone());
-                                ui.close();
-                            }
-                            if ui.button("编辑并重发").clicked() {
-                                edit = Some(row.id.clone());
-                                ui.close();
-                            }
-                            if ui.button("查看详情").clicked() {
+                        action_menu(egui::Popup::context_menu(&response), |ui| {
+                            if menu_item(ui, "查看详情", true) {
                                 choose = Some((row.id.clone(), egui::Modifiers::NONE));
                                 open = true;
                                 ui.close();
                             }
-                            if ui.button("复制 URL").clicked() {
+                            if menu_item(ui, "编辑并重发", true) {
+                                edit = Some(row.id.clone());
+                                ui.close();
+                            }
+                            ui.separator();
+                            if menu_item(ui, "复制 URL", true) {
                                 ui.ctx().copy_text(row.url.clone());
                                 ui.close();
                             }
+                            if menu_item(ui, "复制 cURL", true) {
+                                curl = Some(row.id.clone());
+                                ui.close();
+                            }
+                            if menu_item(ui, "导出所选 HAR", true) {
+                                export = true;
+                                ui.close();
+                            }
+                            ui.separator();
                             for (caption, category) in [
                                 ("添加重写规则", crate::rules_ui::RuleCategory::Rewrite),
                                 ("添加断点", crate::rules_ui::RuleCategory::Breakpoint),
                                 ("添加脚本", crate::rules_ui::RuleCategory::Script),
                             ] {
-                                if ui.button(caption).clicked() {
+                                if menu_item(ui, caption, true) {
                                     rule = Some((category, row.method.clone(), row.url.clone()));
                                     ui.close();
                                 }
                             }
-                            if !history && ui.button("从此会话移除所选").clicked() {
-                                hide = true;
-                                ui.close();
-                            }
-                            if ui.button("导出所选 HAR").clicked() {
-                                export = true;
-                                ui.close();
-                            }
+                            ui.separator();
                             for (caption, compare, now) in [
                                 ("添加书签", false, false),
                                 ("添加到对比池", true, false),
                                 ("对比所选", true, true),
                             ] {
-                                if ui
-                                    .add_enabled(
-                                        !row.incognito && (!now || app.selection.len() >= 2),
-                                        egui::Button::new(caption),
-                                    )
-                                    .clicked()
-                                {
+                                if menu_item(
+                                    ui,
+                                    caption,
+                                    !row.incognito && (!now || app.selection.len() >= 2),
+                                ) {
                                     keep = Some((compare, now));
+                                    ui.close();
+                                }
+                            }
+                            if !history {
+                                ui.separator();
+                                if menu_item(ui, "从此会话移除所选", true) {
+                                    hide = true;
                                     ui.close();
                                 }
                             }
