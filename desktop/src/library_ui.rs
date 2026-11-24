@@ -293,24 +293,27 @@ impl LibraryUi {
     }
 
     pub(super) fn show_sidebar(&mut self, ui: &mut egui::Ui, _: &Worker) {
+        use crate::workbench::sidebar_row;
+
         let pool = self.comparison_count;
         egui::CollapsingHeader::new(egui::RichText::new("收藏").strong())
             .default_open(true)
             .show(ui, |ui| {
-                if ui.button(format!("对比池 ({pool})")).clicked() {
+                if sidebar_row(ui, format!("对比池 ({pool})"), None).clicked() {
                     self.open(true);
                 }
             });
         egui::CollapsingHeader::new(egui::RichText::new("书签").strong())
             .default_open(true)
             .show(ui, |ui| {
-                if ui.button("我的书签").clicked() {
+                if sidebar_row(ui, "我的书签", None).clicked() {
                     self.open(false);
                 }
                 let mut selected = None;
                 for (id, name) in &self.bookmarks {
-                    if ui
-                        .selectable_label(self.open && !self.compare && self.selected == *id, name)
+                    let active = self.open && !self.compare && self.selected == *id;
+                    if sidebar_row(ui, name, Some(active))
+                        .on_hover_text(name)
                         .clicked()
                     {
                         selected = Some(id.clone());

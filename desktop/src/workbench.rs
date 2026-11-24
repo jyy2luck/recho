@@ -23,6 +23,24 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
         .show(ui, body);
 }
 
+pub(super) fn sidebar_row(
+    ui: &mut egui::Ui,
+    title: impl Into<egui::WidgetText>,
+    selected: Option<bool>,
+) -> egui::Response {
+    let title = title.into();
+    let button = match selected {
+        Some(selected) => egui::Button::selectable(selected, title),
+        None => egui::Button::new(title).frame_when_inactive(false),
+    };
+    ui.add(
+        button
+            .right_text(())
+            .min_size(egui::vec2(ui.available_width(), 0.0))
+            .wrap_mode(egui::TextWrapMode::Truncate),
+    )
+}
+
 pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     if ui
         .ctx()
@@ -512,9 +530,10 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.visuals_mut().collapsing_header_frame = true;
             if app.navigation == Navigation::Tools {
                 section(ui, "调试", |ui| {
-                    if ui.button("自动高亮").clicked() {
+                    if sidebar_row(ui, "自动高亮", None).clicked() {
                         app.edit_highlights();
                     }
                     use crate::rules_ui::RuleCategory;
@@ -524,7 +543,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                         ("断点", RuleCategory::Breakpoint),
                         ("脚本", RuleCategory::Script),
                     ] {
-                        if ui.button(label).clicked() {
+                        if sidebar_row(ui, label, None).clicked() {
                             app.rules.open(category);
                             app.rules_open = true;
                             app.network_open = false;
@@ -541,19 +560,19 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                         ("镜像", NetworkSection::Mirror),
                         ("反向代理", NetworkSection::Reverse),
                     ] {
-                        if ui.button(label).clicked() {
+                        if sidebar_row(ui, label, None).clicked() {
                             app.open_network(section);
                         }
                     }
                 });
                 section(ui, "本地工具", |ui| {
-                    if ui.button("MCP").clicked() {
+                    if sidebar_row(ui, "MCP", None).clicked() {
                         app.mcp.open();
                     }
-                    if ui.button("访问令牌").clicked() {
+                    if sidebar_row(ui, "访问令牌", None).clicked() {
                         app.mcp.open_tokens();
                     }
-                    if ui.button("安装 CA 证书").clicked() {
+                    if sidebar_row(ui, "安装 CA 证书", None).clicked() {
                         app.certificates.open(CertificatePage::Local);
                     }
                 });
@@ -563,7 +582,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                 });
                 app.library.show_sidebar(ui, &app.worker);
                 section(ui, "设备", |ui| {
-                    if ui.button("安装 CA 证书").clicked() {
+                    if sidebar_row(ui, "安装 CA 证书", None).clicked() {
                         app.certificates.open(CertificatePage::Local);
                     }
                 });
@@ -573,14 +592,16 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                     if apps.is_empty() {
                         ui.weak("暂无应用程序");
                     }
-                    if !app.app_filter.is_empty()
-                        && ui.selectable_label(false, "全部应用").clicked()
+                    if !app.app_filter.is_empty() && sidebar_row(ui, "全部应用", None).clicked()
                     {
                         app.app_filter.clear();
                         app.refilter();
                     }
                     for name in apps {
-                        if ui.selectable_label(app.app_filter == name, &name).clicked() {
+                        if sidebar_row(ui, &name, Some(app.app_filter == name))
+                            .on_hover_text(&name)
+                            .clicked()
+                        {
                             app.app_filter = if app.app_filter == name {
                                 String::new()
                             } else {
@@ -597,15 +618,14 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                     .filter(|host| !host.is_empty())
                     .collect();
                 section(ui, "域名", |ui| {
-                    if !app.host_filter.is_empty()
-                        && ui.selectable_label(false, "全部域名").clicked()
+                    if !app.host_filter.is_empty() && sidebar_row(ui, "全部域名", None).clicked()
                     {
                         app.host_filter.clear();
                         app.refilter();
                     }
                     for host in hosts {
-                        if ui
-                            .selectable_label(app.host_filter == host, &host)
+                        if sidebar_row(ui, &host, Some(app.host_filter == host))
+                            .on_hover_text(&host)
                             .clicked()
                         {
                             app.host_filter = if app.host_filter == host {

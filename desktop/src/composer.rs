@@ -1289,10 +1289,13 @@ impl Composer {
         }
     }
     pub(super) fn show_specifications(&mut self, ui: &mut egui::Ui) {
+        use crate::workbench::sidebar_row;
+
         let mut selected = None;
         if let Some(document) = &self.document {
             for definition in rows(document, "specifications") {
-                if ui.selectable_label(false, name(definition)).clicked() {
+                let name = name(definition);
+                if sidebar_row(ui, name, None).on_hover_text(name).clicked() {
                     selected = Some(definition.clone());
                 }
             }
@@ -1312,7 +1315,7 @@ impl Composer {
                 self.add(request);
             }
         }
-        if ui.button("新建 Protobuf").clicked() {
+        if sidebar_row(ui, "新建 Protobuf", None).clicked() {
             self.open_protobuf();
         }
     }
