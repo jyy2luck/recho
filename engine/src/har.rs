@@ -86,7 +86,7 @@ impl DesktopEngine {
                         .map(|(name, value)| json!({"name":name,"value":value.trim()}))
                         .collect::<Vec<_>>()
                 };
-                entries.push(json!({
+                let mut entry = json!({
                     "startedDateTime":session.started_at, "time":session.duration,
                     "request":{"method":session.method,"url":session.url,"httpVersion":session.protocol,
                         "headers":headers(&session.request_headers),"queryString":[],"cookies":[],
@@ -96,7 +96,11 @@ impl DesktopEngine {
                         "content":response,"redirectURL":"","headersSize":-1,"bodySize":session.response_bytes},
                     "cache":{},"timings":{"send":0,"wait":session.duration,"receive":0},
                     "serverIPAddress":session.server_ip,"_rechoError":session.error,
-                }));
+                });
+                if !session.notes.is_empty() {
+                    entry["comment"] = json!(session.notes);
+                }
+                entries.push(entry);
             }
             drop(history);
             let bytes = serde_json::to_vec(
@@ -209,6 +213,7 @@ fn parse_entry(
         request_bytes: request_body.as_ref().map_or(0, Vec::len),
         response_bytes: response_body.as_ref().map_or(0, Vec::len),
         error: entry["_rechoError"].as_str().map(str::to_owned),
+        notes: entry["comment"].as_str().unwrap_or_default().into(),
         tls: url.starts_with("https:"),
         server_ip: entry["serverIPAddress"].as_str().map(str::to_owned),
         protocol: protocol.into(),
@@ -233,7 +238,7 @@ mod tests {
         let input_path = directory.path().join("fixture.har");
         let exported_path = directory.path().join("exported.har");
         let entry = json!({
-            "startedDateTime": "2026-11-20T10:00:00.123+00:00", "time": 7,
+            "startedDateTime": "2026-11-20T10:00:00.123+00:00", "time": 7, "comment": "inspect this",
             "request": {"method":"POST","url":"http://127.0.0.1/test","httpVersion":"HTTP/1.1","bodySize":4,
                 "headers":[{"name":"content-type","value":"application/octet-stream"}],
                 "postData":{"text":"AAH/wQ==","encoding":"base64"}},
@@ -268,6 +273,9 @@ mod tests {
                 .unwrap(),
             1
         );
+        let exported: Value =
+            serde_json::from_slice(&std::fs::read(&exported_path).unwrap()).unwrap();
+        assert_eq!(exported["log"]["entries"][0]["comment"], "inspect this");
         let (group, _) = engine.import_har(&exported_path).unwrap();
         let rows = engine.history_rows(0, 20, "", Some(&group)).unwrap();
         assert_eq!(

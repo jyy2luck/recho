@@ -21,6 +21,7 @@ pub struct Space {
     pub application: String,
     pub host: String,
     pub protocol: String,
+    pub version: String,
     pub content_type: String,
     pub status: u16,
     pub selection: BTreeSet<String>,
@@ -32,6 +33,13 @@ pub struct Space {
     pub hidden: BTreeSet<String>,
     pub conditions: ConditionSet,
     pub highlights: ConditionSet,
+    pub highlight_color: Option<String>,
+}
+
+impl Space {
+    pub fn highlight_color(&self) -> &str {
+        self.highlight_color.as_deref().unwrap_or("蓝色")
+    }
 }
 
 pub(super) struct Spaces {
@@ -46,8 +54,9 @@ pub(super) struct Spaces {
     save_at: Option<Instant>,
     pub error: Option<String>,
     volatile_hidden: BTreeSet<String>,
-    condition_job: Option<MatchHandle>,
-    highlight_job: Option<MatchHandle>,
+    match_job: Option<MatchHandle>,
+    pub filter_draft: ConditionSet,
+    pub filter_error: Option<String>,
     pub matches: Option<BTreeSet<String>>,
     pub marked: BTreeSet<String>,
 }
@@ -90,8 +99,9 @@ impl Spaces {
             save_at: None,
             error,
             volatile_hidden: BTreeSet::new(),
-            condition_job: None,
-            highlight_job: None,
+            match_job: None,
+            filter_draft: ConditionSet::default(),
+            filter_error: None,
             matches: None,
             marked: BTreeSet::new(),
         }
@@ -137,6 +147,7 @@ impl Recho {
         space.application.clone_from(&self.app_filter);
         space.host.clone_from(&self.host_filter);
         space.protocol.clone_from(&self.protocol_filter);
+        space.version.clone_from(&self.version_filter);
         space.content_type.clone_from(&self.type_filter);
         space.status = self.status_filter;
         space.sort = self.sort_column;
@@ -164,8 +175,10 @@ impl Recho {
         self.remember_capture();
         self.spaces.group = group;
         self.spaces.rows.clear();
+        self.spaces.match_job = None;
         self.spaces.matches = None;
         self.spaces.marked.clear();
+        self.highlight_editor = None;
         let group = self.spaces.group.clone();
         let state = self
             .spaces
@@ -183,11 +196,16 @@ impl Recho {
         self.filter = state.query;
         self.app_filter = state.application;
         self.host_filter = state.host;
-        self.protocol_filter = state.protocol;
+        (self.protocol_filter, self.version_filter) = match state.protocol.as_str() {
+            "HTTP1" | "HTTP2" | "HTTP3" => (String::new(), state.protocol),
+            _ => (state.protocol, state.version),
+        };
         self.type_filter = state.content_type;
         self.status_filter = state.status;
         self.sort_column = state.sort;
         self.ascending = !state.descending;
+        self.spaces.filter_draft = state.conditions;
+        self.spaces.filter_error = self.spaces.filter_draft.validate().err();
         if self.navigation != crate::Navigation::History {
             self.select(None);
             self.details_open = state.details_open;
@@ -253,27 +271,26 @@ impl Recho {
         let Some(space) = self.spaces.current() else {
             return;
         };
-        let (conditions, highlights) = (space.conditions.clone(), space.highlights.clone());
-        let ids = || self.rows.iter().map(|row| row.id.clone()).collect();
-        if conditions.active() {
-            match self.worker.filter_captures(ids(), conditions) {
-                Ok(reply) => self.spaces.condition_job = Some(reply),
+        let filtering = space.conditions.active();
+        let highlighting = space.highlights.active();
+        if filtering || highlighting {
+            match self.worker.filter_captures(
+                self.rows.iter().map(|row| row.id.clone()).collect(),
+                space.conditions.clone(),
+                space.highlights.clone(),
+                space.highlight_color().into(),
+            ) {
+                Ok(reply) => self.spaces.match_job = Some(reply),
                 Err(error) => self.error = Some(error),
             }
         } else {
-            self.spaces.condition_job = None;
-            self.spaces.matches = None;
+            self.spaces.match_job = None;
         }
-        if highlights.active() {
-            match self.worker.filter_captures(ids(), highlights) {
-                Ok(reply) => self.spaces.highlight_job = Some(reply),
-                Err(error) => self.error = Some(error),
-            }
-        } else {
-            self.spaces.highlight_job = None;
+        if !highlighting {
             self.spaces.marked.clear();
         }
-        if self.spaces.condition_job.is_none() {
+        if !filtering {
+            self.spaces.matches = None;
             self.refilter();
         }
     }
@@ -352,28 +369,23 @@ impl Recho {
 
     pub(super) fn poll_capture_spaces(&mut self) {
         use tokio::sync::oneshot::error::TryRecvError;
-        let result = |job: &mut Option<MatchHandle>| {
-            let reply = match job.as_mut()?.try_recv() {
-                Ok(result) => result,
-                Err(TryRecvError::Empty) => return None,
-                Err(error) => Err(error.to_string()),
-            };
-            *job = None;
-            Some(reply)
-        };
-        if let Some(reply) = result(&mut self.spaces.condition_job) {
-            match reply {
-                Ok(ids) => {
-                    self.spaces.matches = Some(ids.into_iter().collect());
+        if let Some(job) = &mut self.spaces.match_job {
+            match job.try_recv() {
+                Ok(Ok(matches)) => {
+                    self.spaces.match_job = None;
+                    self.spaces.matches = matches.visible.map(|ids| ids.into_iter().collect());
+                    self.spaces.marked = matches.marked.into_iter().collect();
                     self.refilter();
                 }
-                Err(error) => self.error = Some(error),
-            }
-        }
-        if let Some(reply) = result(&mut self.spaces.highlight_job) {
-            match reply {
-                Ok(ids) => self.spaces.marked = ids.into_iter().collect(),
-                Err(error) => self.error = Some(error),
+                Ok(Err(error)) => {
+                    self.spaces.match_job = None;
+                    self.error = Some(error);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(error) => {
+                    self.spaces.match_job = None;
+                    self.error = Some(error.to_string());
+                }
             }
         }
         if let Some(reply) = &mut self.spaces.settings {

@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod body;
+mod capture_filter_ui;
 mod capture_spaces;
 mod certificate_ui;
 mod composer;
@@ -35,6 +36,40 @@ enum Navigation {
     Environments,
     History,
     Tools,
+}
+
+fn quick_content_matches(row: &Row, filter: &str) -> bool {
+    let mime = row.content_type.as_str();
+    match filter {
+        "text/plain" => {
+            mime.starts_with("text/")
+                && ![
+                    "html",
+                    "xml",
+                    "javascript",
+                    "ecmascript",
+                    "css",
+                    "event-stream",
+                ]
+                .iter()
+                .any(|kind| mime.contains(kind))
+        }
+        "javascript" => {
+            mime.contains("javascript")
+                || mime.contains("ecmascript")
+                || (mime.is_empty()
+                    && url::Url::parse(&row.url)
+                        .is_ok_and(|url| url.path().to_ascii_lowercase().ends_with(".js")))
+        }
+        "video/" => mime.starts_with("audio/") || mime.starts_with("video/"),
+        "binary" => {
+            row.binary
+                || ["octet-stream", "pdf", "zip"]
+                    .iter()
+                    .any(|kind| mime.contains(kind))
+        }
+        _ => mime.contains(filter),
+    }
 }
 
 struct Viewer {
@@ -88,7 +123,7 @@ struct Recho {
     active_workspace_op: Option<(String, Result<Value, String>, Option<RequestHandle>)>,
     spaces: capture_spaces::Spaces,
     capture_filters: Vec<String>,
-    condition_editor: Option<(bool, recho_core::native::ConditionSet)>,
+    highlight_editor: Option<(recho_core::native::ConditionSet, String)>,
     live_rows: Vec<Row>,
     har_file: Option<(files::FilePick, Option<Vec<String>>)>,
     notice: Option<String>,
@@ -121,6 +156,7 @@ struct Recho {
     host_filter: String,
     app_filter: String,
     protocol_filter: String,
+    version_filter: String,
     status_filter: u16,
     type_filter: String,
     sort_column: usize,
@@ -179,7 +215,7 @@ impl Recho {
             worker: Worker::start(directory, port, cc.egui_ctx.clone()),
             live_rows: Vec::new(),
             capture_filters: Vec::new(),
-            condition_editor: None,
+            highlight_editor: None,
             har_file: None,
             notice: None,
             network: network_ui::NetworkUi::default(),
@@ -220,6 +256,7 @@ impl Recho {
             host_filter: String::new(),
             app_filter: String::new(),
             protocol_filter: String::new(),
+            version_filter: String::new(),
             status_filter: 0,
             type_filter: String::new(),
             sort_column: 0,
@@ -560,9 +597,15 @@ impl Recho {
                     || match self.protocol_filter.as_str() {
                         "HTTPS" => row.url.starts_with("https:"),
                         "HTTP" => row.url.starts_with("http:"),
-                        "HTTP1" => row.protocol.contains('1'),
-                        "HTTP2" => row.protocol.contains('2'),
-                        "HTTP3" => row.protocol.contains('3'),
+                        "WebSocket" => row.websocket,
+                        "SSE" => row.content_type == "text/event-stream",
+                        _ => false,
+                    };
+                let version_match = self.version_filter.is_empty()
+                    || match self.version_filter.as_str() {
+                        "HTTP1" => row.protocol.starts_with("HTTP/1"),
+                        "HTTP2" => row.protocol == "HTTP/2",
+                        "HTTP3" => row.protocol == "HTTP/3",
                         _ => false,
                     };
                 let mut applicable = self
@@ -580,11 +623,12 @@ impl Recho {
                         .as_ref()
                         .is_none_or(|ids| ids.contains(&row.id))
                     && protocol_match
+                    && version_match
                     && (self.host_filter.is_empty() || row.host == self.host_filter)
                     && (self.app_filter.is_empty() || row.application == self.app_filter)
                     && (self.status_filter == 0 || row.status / 100 == self.status_filter)
                     && (self.type_filter.is_empty()
-                        || row.content_type.contains(&self.type_filter)))
+                        || quick_content_matches(row, &self.type_filter)))
                 .then_some(index)
             })
             .collect();

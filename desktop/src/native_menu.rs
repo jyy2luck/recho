@@ -395,12 +395,7 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
             app.network_open = false;
         }
         Action::Network(section) => app.open_network(section),
-        Action::Highlights => {
-            app.condition_editor = app
-                .spaces
-                .current()
-                .map(|space| (true, space.highlights.clone()))
-        }
+        Action::Highlights => app.edit_highlights(),
         Action::SystemProxy => app.send(Command::SystemProxy(
             !app.system_proxy.0 && !app.system_proxy.1,
         )),

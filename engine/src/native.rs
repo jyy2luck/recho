@@ -8,7 +8,7 @@ mod har;
 pub use crate::certificates::PublicCertificate;
 pub use crate::identity::CERTIFICATE_DOWNLOAD_URL;
 pub use crate::local_network::proxy_addresses;
-pub use capture_conditions::{Condition, ConditionSet, Field, Operator};
+pub use capture_conditions::{CaptureMatches, Condition, ConditionSet, Field, Operator};
 
 pub fn write_local_file(path: &std::path::Path, bytes: &[u8]) -> std::result::Result<(), String> {
     crate::storage::atomic_write(path, bytes).map_err(|error| error.to_string())
@@ -48,6 +48,8 @@ pub struct Row {
     pub server_ip: String,
     pub protocol: String,
     pub content_type: String,
+    pub websocket: bool,
+    pub binary: bool,
     pub error: Option<String>,
     pub group: String,
     pub started_at: String,
@@ -80,9 +82,20 @@ impl From<&crate::storage::Session> for Row {
                 .find_map(|line| {
                     line.split_once(':')
                         .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-                        .map(|(_, value)| value.trim().to_lowercase())
+                        .map(|(_, value)| {
+                            value
+                                .split(';')
+                                .next()
+                                .unwrap_or_default()
+                                .trim()
+                                .to_lowercase()
+                        })
                 })
                 .unwrap_or_default(),
+            websocket: session.status == 101 || !session.websocket_frames.is_empty(),
+            binary: session.raw_response_base64.is_some()
+                || session.response_body.starts_with("[Binary body:")
+                || session.response_body.contains('\0'),
             error: session.error.clone(),
             group: if session.capture_group.is_empty() {
                 "default".into()

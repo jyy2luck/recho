@@ -445,13 +445,8 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 return;
             }
             filters(app, ui);
+            crate::capture_filter_ui::show(app, ui);
             ui.horizontal(|ui| {
-                if ui.button("条件筛选").clicked() {
-                    app.condition_editor = app
-                        .spaces
-                        .current()
-                        .map(|space| (false, space.conditions.clone()));
-                }
                 if !app.capture_filters.is_empty() {
                     ui.weak(format!("MCP 筛选 ({})", app.capture_filters.len()));
                 }
@@ -520,10 +515,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
             if app.navigation == Navigation::Tools {
                 section(ui, "调试", |ui| {
                     if ui.button("自动高亮").clicked() {
-                        app.condition_editor = app
-                            .spaces
-                            .current()
-                            .map(|space| (true, space.highlights.clone()));
+                        app.edit_highlights();
                     }
                     use crate::rules_ui::RuleCategory;
                     for (label, category) in [
@@ -726,6 +718,7 @@ fn filters(app: &mut Recho, ui: &mut egui::Ui) {
                 if ui
                     .selectable_label(
                         app.protocol_filter.is_empty()
+                            && app.version_filter.is_empty()
                             && app.type_filter.is_empty()
                             && app.status_filter == 0,
                         "All",
@@ -733,25 +726,31 @@ fn filters(app: &mut Recho, ui: &mut egui::Ui) {
                     .clicked()
                 {
                     app.protocol_filter.clear();
+                    app.version_filter.clear();
                     app.type_filter.clear();
                     app.status_filter = 0;
                     changed = true;
                 }
                 ui.separator();
-                for protocol in ["HTTP", "HTTPS", "HTTP1", "HTTP2", "HTTP3"] {
-                    if ui
-                        .selectable_label(app.protocol_filter == protocol, protocol)
-                        .clicked()
-                    {
-                        app.protocol_filter = if app.protocol_filter == protocol {
-                            String::new()
-                        } else {
-                            protocol.into()
-                        };
-                        changed = true;
+                for (filter, choices) in [
+                    (
+                        &mut app.protocol_filter,
+                        &["HTTP", "HTTPS", "WebSocket", "SSE"][..],
+                    ),
+                    (&mut app.version_filter, &["HTTP1", "HTTP2", "HTTP3"][..]),
+                ] {
+                    for &choice in choices {
+                        if ui.selectable_label(*filter == choice, choice).clicked() {
+                            *filter = if *filter == choice {
+                                String::new()
+                            } else {
+                                choice.into()
+                            };
+                            changed = true;
+                        }
                     }
+                    ui.separator();
                 }
-                ui.separator();
                 for (label, content_type) in [
                     ("JSON", "json"),
                     ("XML", "xml"),
@@ -760,6 +759,7 @@ fn filters(app: &mut Recho, ui: &mut egui::Ui) {
                     ("JS", "javascript"),
                     ("图片", "image/"),
                     ("媒体", "video/"),
+                    ("二进制", "binary"),
                 ] {
                     if ui
                         .selectable_label(app.type_filter == content_type, label)
@@ -990,6 +990,11 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.set_min_width(980.0);
             ui.visuals_mut().widgets.hovered.bg_fill = colors.chrome;
+            let cyan = if ui.visuals().dark_mode {
+                egui::Color32::from_rgb(107, 216, 225)
+            } else {
+                egui::Color32::from_rgb(0, 104, 117)
+            };
             let table = TableBuilder::new(ui)
                 .id_salt(("captures", history))
                 .resizable(true)
@@ -1081,21 +1086,29 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                             format!("{} ms", row.duration_ms),
                             format!("{} B", row.response_bytes),
                         ];
+                        let highlight = (!history && app.spaces.marked.contains(&row.id))
+                            .then(|| app.spaces.current().map(|space| space.highlight_color()))
+                            .flatten();
+                        let marked_color = match highlight {
+                            Some("红色") => Some(colors.red),
+                            Some("黄色") => Some(colors.warning),
+                            Some("绿色") => Some(colors.green),
+                            Some("蓝色") => Some(colors.key),
+                            Some("青色") => Some(cyan),
+                            _ => None,
+                        };
                         for (index, text) in cells.into_iter().enumerate() {
                             table_row.col(|ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(text).size(12.0).color(
-                                        if index == 5 {
-                                            color
-                                        } else if !history && app.spaces.marked.contains(&row.id) {
-                                            colors.accent
-                                        } else {
-                                            ui.visuals().text_color()
-                                        },
-                                    ))
-                                    .truncate()
-                                    .selectable(false),
-                                );
+                                let mut text =
+                                    RichText::new(text).size(12.0).color(if index == 5 {
+                                        color
+                                    } else {
+                                        marked_color.unwrap_or_else(|| ui.visuals().text_color())
+                                    });
+                                if highlight == Some("划线") {
+                                    text = text.strikethrough();
+                                }
+                                ui.add(egui::Label::new(text).truncate().selectable(false));
                             });
                         }
                         let response = table_row.response();
@@ -1446,111 +1459,8 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         });
 }
 
-fn condition_dialog(app: &mut Recho, ctx: &egui::Context) {
-    use recho_core::native::{Condition, Field, Operator};
-    let Some((highlight, conditions)) = &mut app.condition_editor else {
-        return;
-    };
-    let mut opened = true;
-    let mut save = false;
-    egui::Window::new(if *highlight {
-        "自动高亮"
-    } else {
-        "条件筛选"
-    })
-    .open(&mut opened)
-    .default_width(660.0)
-    .resizable(true)
-    .show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut conditions.any, false, "满足全部");
-            ui.selectable_value(&mut conditions.any, true, "满足任一");
-        });
-        let mut remove = None;
-        egui::ScrollArea::vertical()
-            .max_height(360.0)
-            .show(ui, |ui| {
-                for (index, item) in conditions.items.iter_mut().enumerate() {
-                    ui.push_id(index, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.checkbox(&mut item.enabled, "");
-                            egui::ComboBox::from_id_salt("field")
-                                .selected_text(item.field.label())
-                                .show_ui(ui, |ui| {
-                                    for field in Field::ALL {
-                                        ui.selectable_value(&mut item.field, field, field.label());
-                                    }
-                                });
-                            egui::ComboBox::from_id_salt("operator")
-                                .selected_text(item.operator.label())
-                                .show_ui(ui, |ui| {
-                                    for operator in Operator::ALL {
-                                        ui.selectable_value(
-                                            &mut item.operator,
-                                            operator,
-                                            operator.label(),
-                                        );
-                                    }
-                                });
-                            ui.add(
-                                egui::TextEdit::singleline(&mut item.value)
-                                    .hint_text("匹配值")
-                                    .char_limit(4096)
-                                    .desired_width(175.0),
-                            );
-                            ui.checkbox(&mut item.sensitive, "Aa")
-                                .on_hover_text("区分大小写");
-                            if item.field == Field::All {
-                                ui.checkbox(&mut item.deep, "深度");
-                            }
-                            if ui.small_button("移除").clicked() {
-                                remove = Some(index);
-                            }
-                        });
-                    });
-                }
-            });
-        if let Some(index) = remove {
-            conditions.items.remove(index);
-        }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(conditions.items.len() < 32, egui::Button::new("添加条件"))
-                .clicked()
-            {
-                conditions.items.push(Condition::default());
-            }
-            let validation = conditions.validate();
-            if ui
-                .add_enabled(validation.is_ok(), egui::Button::new("应用"))
-                .clicked()
-            {
-                save = true;
-            }
-            if let Err(error) = validation {
-                ui.label(error);
-            }
-        });
-        ui.weak("正文与控制台按抓包预览匹配。");
-    });
-    if save {
-        if let Some((highlight, conditions)) = app.condition_editor.take() {
-            if let Some(space) = app.spaces.items.get_mut(&app.spaces.group) {
-                if highlight {
-                    space.highlights = conditions;
-                } else {
-                    space.conditions = conditions;
-                }
-                app.evaluate_conditions();
-            }
-        }
-    } else if !opened {
-        app.condition_editor = None;
-    }
-}
-
 fn dialogs(app: &mut Recho, ctx: &egui::Context) {
-    condition_dialog(app, ctx);
+    crate::capture_filter_ui::highlight_dialog(app, ctx);
     if app.connection_open {
         let mut open = true;
         egui::Window::new("连接设置")

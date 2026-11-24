@@ -139,6 +139,8 @@ pub struct Session {
     pub client_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interceptors: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grpc_messages: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -576,6 +578,7 @@ impl Recording {
             server_ip: None,
             client_ip: None,
             interceptors: vec![],
+            notes: String::new(),
             grpc_messages: vec![],
             request_trailers: String::new(),
             response_trailers: String::new(),

@@ -108,7 +108,7 @@ try:
     report["proxy_port"] = port
     wait_for(lambda: bool(json.loads(ui("windows"))))
     ui("activate")
-    tree()
+    wait_for(lambda: "添加条件" in tree())
     phase = "empty"
     time.sleep(5)
     screenshot("empty")

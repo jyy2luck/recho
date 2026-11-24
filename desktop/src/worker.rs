@@ -1,5 +1,7 @@
 use eframe::egui;
-use recho_core::native::{ConditionSet, DesktopEngine, Detail, Phase, Row, Snapshot};
+use recho_core::native::{
+    CaptureMatches, ConditionSet, DesktopEngine, Detail, Phase, Row, Snapshot,
+};
 use serde_json::Value;
 use std::{
     path::PathBuf,
@@ -15,7 +17,7 @@ use tokio::{
 pub type RequestHandle = oneshot::Receiver<Result<Value, String>>;
 pub type DetailHandle = oneshot::Receiver<Result<Detail, String>>;
 pub type HistoryHandle = oneshot::Receiver<Result<Vec<Row>, String>>;
-pub type MatchHandle = oneshot::Receiver<Result<Vec<String>, String>>;
+pub type MatchHandle = oneshot::Receiver<Result<CaptureMatches, String>>;
 
 pub enum Command {
     Port(u16),
@@ -34,7 +36,9 @@ pub enum Command {
     MatchCaptures {
         ids: Vec<String>,
         conditions: ConditionSet,
-        reply: oneshot::Sender<Result<Vec<String>, String>>,
+        highlights: ConditionSet,
+        highlight: String,
+        reply: oneshot::Sender<Result<CaptureMatches, String>>,
     },
     SystemProxy(bool),
     SystemProxyPreferences(crate::platform::ProxyPreferences),
@@ -180,9 +184,9 @@ impl Worker {
                                     }
                                     Err(error) => Err(error),
                                 },
-                                Command::MatchCaptures { ids, conditions, reply } => {
+                                Command::MatchCaptures { ids, conditions, highlights, highlight, reply } => {
                                     if !reply.is_closed() {
-                                        let _ = reply.send(engine.filter_captures(&ids, &conditions));
+                                        let _ = reply.send(engine.filter_captures(&ids, &conditions, &highlights, &highlight));
                                         ctx.request_repaint();
                                     }
                                     Ok(())
@@ -357,11 +361,15 @@ impl Worker {
         &self,
         ids: Vec<String>,
         conditions: ConditionSet,
+        highlights: ConditionSet,
+        highlight: String,
     ) -> Result<MatchHandle, String> {
         let (reply, receive) = oneshot::channel();
         self.send(Command::MatchCaptures {
             ids,
             conditions,
+            highlights,
+            highlight,
             reply,
         })?;
         Ok(receive)
@@ -431,6 +439,8 @@ mod tests {
                 server_ip: String::new(),
                 protocol: "HTTP/1.1".into(),
                 content_type: "text/plain".into(),
+                websocket: false,
+                binary: false,
                 error: None,
                 group: "default".into(),
                 started_at: String::new(),
