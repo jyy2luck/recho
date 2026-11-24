@@ -5,6 +5,9 @@ use super::*;
 mod capture_conditions;
 #[path = "har.rs"]
 mod har;
+pub use crate::certificates::PublicCertificate;
+pub use crate::identity::CERTIFICATE_DOWNLOAD_URL;
+pub use crate::local_network::proxy_addresses;
 pub use capture_conditions::{Condition, ConditionSet, Field, Operator};
 
 pub fn write_local_file(path: &std::path::Path, bytes: &[u8]) -> std::result::Result<(), String> {

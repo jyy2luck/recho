@@ -11,6 +11,7 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig, pki_types::PrivatePkcs8K
 use std::{
     collections::BTreeMap,
     fs,
+    io::Read,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -34,18 +35,73 @@ pub struct Authority {
     key: KeyPair,
     cache: Mutex<BTreeMap<String, Arc<ServerConfig>>>,
 }
-impl Authority {
-    pub fn info(&self) -> Result<serde_json::Value> {
-        use base64::Engine as _;
-        let pem = fs::read_to_string(&self.ca_path)?;
+
+pub struct PublicCertificate {
+    pub pem: String,
+    pub der: Vec<u8>,
+    pub subject_der: Vec<u8>,
+    pub subject: String,
+    pub issuer: String,
+    pub serial: String,
+    pub not_before: String,
+    pub not_after: String,
+}
+
+impl PublicCertificate {
+    pub fn read(path: &Path) -> Result<Self> {
+        const MAX_PEM_SIZE: usize = 64 * 1024;
+        let mut pem = String::new();
+        fs::File::open(path)?
+            .take((MAX_PEM_SIZE + 1) as u64)
+            .read_to_string(&mut pem)?;
+        let text = pem.trim();
+        if pem.len() > MAX_PEM_SIZE
+            || !text.starts_with("-----BEGIN CERTIFICATE-----")
+            || !text.ends_with("-----END CERTIFICATE-----")
+            || text.matches("-----BEGIN ").count() != 1
+            || text.matches("-----END ").count() != 1
+        {
+            return Err(Error::bad("Expected exactly one public CA certificate"));
+        }
         let der = rustls_pemfile::certs(&mut pem.as_bytes())
             .next()
-            .ok_or_else(|| Error::bad("CA certificate missing"))??;
-        let (_, cert) = x509_parser::parse_x509_certificate(&der).map_err(Error::bad)?;
-        let subject_der = base64::engine::general_purpose::STANDARD.encode(cert.subject().as_raw());
-        Ok(
-            serde_json::json!({"pem":pem,"der":base64::engine::general_purpose::STANDARD.encode(&der),"subjectDER":subject_der,"subject":cert.subject().to_string(),"issuer":cert.issuer().to_string(),"serial":cert.raw_serial_as_string(),"notBefore":cert.validity().not_before.to_rfc2822().map_err(Error::bad)?,"notAfter":cert.validity().not_after.to_rfc2822().map_err(Error::bad)?}),
-        )
+            .ok_or_else(|| Error::bad("CA certificate missing"))??
+            .to_vec();
+        let (trailing, cert) = x509_parser::parse_x509_certificate(&der).map_err(Error::bad)?;
+        if !trailing.is_empty() || !cert.is_ca() {
+            return Err(Error::bad("Expected exactly one public CA certificate"));
+        }
+        Ok(Self {
+            pem,
+            subject_der: cert.subject().as_raw().to_vec(),
+            subject: cert.subject().to_string(),
+            issuer: cert.issuer().to_string(),
+            serial: cert.raw_serial_as_string(),
+            not_before: cert
+                .validity()
+                .not_before
+                .to_rfc2822()
+                .map_err(Error::bad)?,
+            not_after: cert.validity().not_after.to_rfc2822().map_err(Error::bad)?,
+            der,
+        })
+    }
+}
+
+impl Authority {
+    pub fn info(&self) -> Result<serde_json::Value> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let certificate = PublicCertificate::read(&self.ca_path)?;
+        Ok(serde_json::json!({
+            "pem": certificate.pem,
+            "der": STANDARD.encode(certificate.der),
+            "subjectDER": STANDARD.encode(certificate.subject_der),
+            "subject": certificate.subject,
+            "issuer": certificate.issuer,
+            "serial": certificate.serial,
+            "notBefore": certificate.not_before,
+            "notAfter": certificate.not_after,
+        }))
     }
     pub async fn open(data_dir: &Path) -> Result<Self> {
         let directory = data_dir.join("certificates");

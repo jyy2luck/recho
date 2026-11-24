@@ -371,11 +371,15 @@ test('MCP token lists preserve legacy credentials and revoke only deleted client
   const ping = token => fetch(`http://127.0.0.1:${engine.proxyPort}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }) });
   const migrated = (await access()).value.tokens;
   assert.equal(migrated.length, 1); assert.equal(migrated[0].name, '默认令牌'); assert.equal(migrated[0].token, legacy);
-  const first = migrated[0];
-  const second = (await access('POST', JSON.stringify({ name: 'Cursor' }))).value.tokens[1];
+  let first = migrated[0];
+  let second = (await access('POST', JSON.stringify({ name: 'Cursor' }))).value.tokens[1];
   assert.notEqual(second.token, legacy);
+  assert.equal(second.lastUsedAt, undefined);
   let firstClient = mcpClient(t, directory, first.token), secondClient = mcpClient(t, directory, second.token);
   assert.ok((await firstClient('initialize')).result); assert.ok((await secondClient('initialize')).result);
+  [first, second] = (await access()).value.tokens;
+  assert.ok(Number.isFinite(Date.parse(first.lastUsedAt)));
+  assert.ok(Number.isFinite(Date.parse(second.lastUsedAt)));
   const saveRemote = await fetch(`http://127.0.0.1:${engine.controlPort}/settings`, { method: 'PATCH', headers: { authorization: `Bearer ${controlToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ mcpRemoteEnabled: true }) });
   assert.equal(saveRemote.status, 200);
   await assertPrivateFile(path.join(directory, 'mcp-token.json'));
@@ -391,6 +395,7 @@ test('MCP token lists preserve legacy credentials and revoke only deleted client
   assert.equal((await ping(legacy)).status, 200); assert.ok((await firstClient('ping')).result);
   await engine.close(); engine = await startEngine({ dataDir: directory, token: controlToken });
   assert.equal((await access()).value.tokens[0].name, 'Codex');
+  assert.equal((await access()).value.tokens[0].lastUsedAt, first.lastUsedAt);
   assert.equal((await access()).value.remoteEnabled, true);
   assert.equal((await ping(legacy)).status, 200); assert.equal((await ping(second.token)).status, 200);
   firstClient = mcpClient(t, directory, first.token); secondClient = mcpClient(t, directory, second.token);

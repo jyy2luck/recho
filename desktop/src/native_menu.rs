@@ -1,4 +1,5 @@
 use super::{Navigation, Recho, platform::ProxyProtocol, theme::Theme, worker::Command};
+use crate::{certificate_ui::Page as CertificatePage, platform::CertificateFormat};
 use crate::{network_ui::NetworkSection, rules_ui::RuleCategory};
 use eframe::egui;
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained, sel};
@@ -26,6 +27,7 @@ enum Action {
     Tools,
     Library,
     Mcp,
+    McpTokens,
     Sidebar,
     Details,
     Theme(Theme),
@@ -40,7 +42,8 @@ enum Action {
     ProxyAuto,
     Connection,
     Intercept,
-    Certificates,
+    Certificates(CertificatePage),
+    ExportCertificate(CertificateFormat),
     About,
     Quit,
 }
@@ -162,6 +165,7 @@ fn install(mtm: MainThreadMarker, ctx: &egui::Context) -> Retained<RechoMenuTarg
     add(&tools, "调试工具", "", Action::Tools);
     add(&tools, "书签与对比池", "", Action::Library);
     add(&tools, "MCP", "", Action::Mcp);
+    add(&tools, "访问令牌", "", Action::McpTokens);
     let view = top(mtm, &menu, "视图");
     for (title, key, action) in [
         ("工作台", "\u{f704}", Action::Capture),
@@ -226,7 +230,15 @@ fn install(mtm: MainThreadMarker, ctx: &egui::Context) -> Retained<RechoMenuTarg
     );
     let certificates = top(mtm, &menu, "证书");
     add(&certificates, "HTTPS 解密", "", Action::Intercept);
-    add(&certificates, "本机根证书", "", Action::Certificates);
+    certificates.addItem(&NSMenuItem::separatorItem(mtm));
+    for (page, label) in CertificatePage::MENU {
+        add(&certificates, label, "", Action::Certificates(page));
+    }
+    certificates.addItem(&NSMenuItem::separatorItem(mtm));
+    let exports = top(mtm, &certificates, "导出 CA 证书");
+    for (format, label) in CertificatePage::EXPORTS {
+        add(&exports, label, "", Action::ExportCertificate(format));
+    }
     let help = top(mtm, &menu, "帮助");
     add(&help, "关于 recho", "", Action::About);
     target
@@ -253,8 +265,11 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             | Action::ImportHar
             | Action::ToggleCapture
             | Action::Clear
-            | Action::Intercept => app.ready,
-            Action::Save | Action::CloseTab => app.composer.active(),
+            | Action::Intercept
+            | Action::Certificates(_)
+            | Action::ExportCertificate(_) => app.ready,
+            Action::Save => app.composer.active(),
+            Action::CloseTab => app.mcp.is_open() || app.composer.active(),
             Action::ExportHar => app.ready && !app.selection.is_empty() && app.har_file.is_none(),
             Action::CopyUrl => app.selected.is_some(),
             Action::SystemProxy => app.ready && (app.running || app.system_proxy.1),
@@ -317,7 +332,13 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::ImportHar => app.choose_har(ctx, false),
         Action::ExportHar => app.choose_har(ctx, true),
         Action::Save => app.composer.save_active(&app.worker),
-        Action::CloseTab => app.composer.close_active(&app.worker),
+        Action::CloseTab => {
+            if app.mcp.is_open() {
+                app.mcp.back();
+            } else {
+                app.composer.close_active(&app.worker);
+            }
+        }
         Action::CopyUrl => {
             if let Some(row) = app
                 .active_rows()
@@ -336,13 +357,8 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::History => app.navigate(Navigation::History),
         Action::Tools => app.navigate(Navigation::Tools),
         Action::Library => app.library.open(false),
-        Action::Mcp => {
-            app.navigate(Navigation::Tools);
-            app.mcp.open();
-            app.mcp_open = true;
-            app.network_open = false;
-            app.rules_open = false;
-        }
+        Action::Mcp => app.mcp.open(),
+        Action::McpTokens => app.mcp.open_tokens(),
         Action::Sidebar => app.sidebar_visible = !app.sidebar_visible,
         Action::Theme(theme) => app.set_theme(theme, ctx),
         Action::Details => {
@@ -359,7 +375,6 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
             app.rules.open(category);
             app.rules_open = true;
             app.network_open = false;
-            app.mcp_open = false;
         }
         Action::Network(section) => app.open_network(section),
         Action::Highlights => {
@@ -375,7 +390,9 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
             app.set_proxy_preferences(protocol.toggled(app.proxy_preferences))
         }
         Action::ProxyAuto => app.toggle_proxy_auto(),
-        Action::Connection | Action::Certificates => app.connection_open = true,
+        Action::Connection => app.connection_open = true,
+        Action::Certificates(page) => app.certificates.open(page),
+        Action::ExportCertificate(format) => app.certificates.export(ctx, format),
         Action::Intercept => app.send(Command::Configure {
             running: app.running,
             intercept_tls: !app.intercept_tls,

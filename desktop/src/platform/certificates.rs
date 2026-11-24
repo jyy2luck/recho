@@ -1,117 +1,154 @@
+mod devices;
+mod exports;
+
 use eframe::egui;
+use recho_core::native::PublicCertificate;
+use sha2::Digest as _;
 #[cfg(windows)]
 use std::ffi::OsString;
 use std::{
-    io::Read,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::mpsc::{self, Receiver, TryRecvError},
     thread,
 };
 
-#[derive(Clone, Copy)]
-enum Action {
+use devices::AndroidDevice;
+pub(crate) use exports::CertificateFormat;
+pub(crate) use recho_core::native::CERTIFICATE_DOWNLOAD_URL;
+
+pub(crate) enum CertificateAction {
     Check,
     Trust,
     Untrust,
     Copy,
     Reveal,
+    OpenKeychain,
+    Details,
+    Export(PathBuf, CertificateFormat),
+    AndroidDevices(PathBuf),
+    AndroidSend(PathBuf, String),
+    AndroidSettings(PathBuf, String),
+    JavaCheck(PathBuf),
+    JavaTrust(PathBuf),
+    JavaManual(PathBuf),
+}
+
+pub(crate) struct CertificateDetail {
+    pub subject: String,
+    pub issuer: String,
+    pub serial: String,
+    pub not_before: String,
+    pub not_after: String,
+    pub sha1: String,
+    pub sha256: String,
+    pub android_name: String,
+}
+
+impl From<PublicCertificate> for CertificateDetail {
+    fn from(cert: PublicCertificate) -> Self {
+        let android_name = exports::android_name(&cert);
+        Self {
+            subject: cert.subject,
+            issuer: cert.issuer,
+            serial: cert.serial,
+            not_before: cert.not_before,
+            not_after: cert.not_after,
+            sha1: fingerprint(sha1::Sha1::digest(&cert.der)),
+            sha256: fingerprint(sha2::Sha256::digest(&cert.der)),
+            android_name,
+        }
+    }
+}
+
+fn fingerprint(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 enum Outcome {
-    Status(bool),
+    Status {
+        detail: CertificateDetail,
+        status: Option<(bool, bool)>,
+        error: Option<String>,
+    },
     Copied(String),
+    Details(CertificateDetail),
+    Devices(Vec<AndroidDevice>),
+    Java(bool),
+    Notice(String),
     Revealed,
 }
 
 #[derive(Default)]
 pub(crate) struct Certificates {
-    status: Option<bool>,
-    confirmation: Option<Action>,
+    pub status: Option<bool>,
+    pub installed: Option<bool>,
+    pub detail: Option<CertificateDetail>,
+    pub devices: Vec<AndroidDevice>,
+    pub java_status: Option<bool>,
+    pub notice: Option<String>,
+    pub error: Option<String>,
     job: Option<Receiver<Result<Outcome, String>>>,
-    error: Option<String>,
 }
 
 impl Certificates {
-    pub(crate) fn show(&mut self, ui: &mut egui::Ui, ca_path: &Path) {
-        if let Some(job) = &self.job {
-            let result = match job.try_recv() {
-                Ok(result) => Some(result),
-                Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => Some(Err("证书操作未完成".into())),
-            };
-            if let Some(result) = result {
-                self.job = None;
-                match result {
-                    Ok(Outcome::Status(trusted)) => self.status = Some(trusted),
-                    Ok(Outcome::Copied(pem)) => ui.ctx().copy_text(pem),
-                    Ok(Outcome::Revealed) => (),
-                    Err(error) => self.error = Some(error),
-                }
+    pub(crate) fn poll(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.job else {
+            return;
+        };
+        let result = match job.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("证书操作未完成".into()),
+        };
+        self.job = None;
+        match result {
+            Ok(Outcome::Status {
+                detail,
+                status,
+                error,
+            }) => {
+                self.detail = Some(detail);
+                self.installed = status.map(|(installed, _)| installed);
+                self.status = status.map(|(_, trusted)| trusted);
+                self.error = error;
             }
-        }
-        let ready = !ca_path.as_os_str().is_empty() && self.job.is_none();
-        ui.label(match self.status {
-            Some(true) => "系统信任检查通过",
-            Some(false) => "尚未信任或验证失败",
-            None => "尚未检查证书信任",
-        });
-        ui.add_enabled_ui(ready, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (label, action) in [
-                    ("检查信任", Action::Check),
-                    ("复制 CA 证书", Action::Copy),
-                    ("显示 CA 文件", Action::Reveal),
-                ] {
-                    if ui.button(label).clicked() {
-                        self.start(ui.ctx(), ca_path, action);
-                    }
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("安装并信任 CA").clicked() {
-                    self.confirmation = Some(Action::Trust);
-                }
-                if ui.button("移除当前用户信任").clicked() {
-                    self.confirmation = Some(Action::Untrust);
-                }
-            });
-        });
-        if self.job.is_some() {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label("正在处理证书操作…");
-            });
-        }
-        if let Some(error) = &self.error {
-            ui.colored_label(ui.visuals().error_fg_color, error);
-        }
-        if let Some(action) = self.confirmation {
-            let modal = egui::Modal::new(egui::Id::new("recho_ca_confirmation")).show(ui.ctx(), |ui| {
-                ui.set_width(380.0);
-                if matches!(action, Action::Trust) {
-                    ui.heading("安装并信任本地 CA");
-                    ui.label("将 Recho Local CA 加入当前用户的信任设置。信任后，支持系统证书库的客户端可以通过 recho 解密 HTTPS 流量。");
-                } else {
-                    ui.heading("移除当前用户信任");
-                    ui.label("移除当前用户对这张 Recho Local CA 的信任。依赖该信任的 HTTPS 解密可能中断。");
-                }
-                ui.horizontal(|ui| {
-                    let confirmed = ui.button("确认").clicked();
-                    (confirmed, ui.button("取消").clicked())
-                }).inner
-            });
-            if modal.inner.0 {
-                self.start(ui.ctx(), ca_path, action);
-                self.confirmation = None;
-            } else if modal.inner.1 || modal.should_close() {
-                self.confirmation = None;
-            }
+            Ok(Outcome::Copied(text)) => ctx.copy_text(text),
+            Ok(Outcome::Details(detail)) => self.detail = Some(detail),
+            Ok(Outcome::Devices(devices)) => self.devices = devices,
+            Ok(Outcome::Java(trusted)) => self.java_status = Some(trusted),
+            Ok(Outcome::Notice(notice)) => self.notice = Some(notice),
+            Ok(Outcome::Revealed) => (),
+            Err(error) => self.error = Some(error),
         }
     }
 
-    fn start(&mut self, ctx: &egui::Context, ca_path: &Path, action: Action) {
+    pub(crate) fn busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    pub(crate) fn start(&mut self, ctx: &egui::Context, ca_path: &Path, action: CertificateAction) {
+        if self.busy() {
+            return;
+        }
         self.error = None;
+        self.notice = None;
+        use CertificateAction::*;
+        match action {
+            Check | Trust | Untrust => {
+                self.installed = None;
+                self.status = None;
+            }
+            AndroidDevices(_) => self.devices.clear(),
+            JavaCheck(_) | JavaTrust(_) => self.java_status = None,
+            _ => (),
+        }
         let path = ca_path.to_path_buf();
         let ctx = ctx.clone();
         let (send, receive) = mpsc::sync_channel(1);
@@ -128,30 +165,75 @@ impl Certificates {
     }
 }
 
-fn perform(path: &Path, action: Action) -> Result<Outcome, String> {
-    let mut pem = String::new();
-    std::fs::File::open(path)
-        .map_err(|error| error.to_string())?
-        .take(64 * 1024)
-        .read_to_string(&mut pem)
-        .map_err(|error| error.to_string())?;
-    let pem_text = pem.trim();
-    if !pem_text.starts_with("-----BEGIN CERTIFICATE-----")
-        || !pem_text.ends_with("-----END CERTIFICATE-----")
-        || pem_text.matches("-----BEGIN ").count() != 1
-    {
-        return Err("本地 CA 文件必须只包含一张公开证书".into());
-    }
+fn perform(path: &Path, action: CertificateAction) -> Result<Outcome, String> {
+    use CertificateAction::*;
     match action {
-        Action::Copy => return Ok(Outcome::Copied(pem)),
-        Action::Reveal => {
+        AndroidDevices(adb) => return devices::android_devices(&adb).map(Outcome::Devices),
+        AndroidSettings(adb, serial) => {
+            devices::android_settings(&adb, &serial)?;
+            return Ok(Outcome::Notice("已在设备上打开安全设置".into()));
+        }
+        OpenKeychain => {
+            open_keychain()?;
+            return Ok(Outcome::Revealed);
+        }
+        Reveal => {
             reveal(path)?;
             return Ok(Outcome::Revealed);
         }
-        Action::Trust | Action::Untrust => change_trust(path, action)?,
-        Action::Check => (),
+        _ => (),
     }
-    trustworthy(path).map(Outcome::Status)
+    let cert = PublicCertificate::read(path)
+        .map_err(|error| format!("无法读取本地 CA 公钥证书：{error}"))?;
+    match action {
+        Copy => Ok(Outcome::Copied(cert.pem)),
+        Details => Ok(Outcome::Details(cert.into())),
+        Check | Trust | Untrust => {
+            let mut snapshot = tempfile::Builder::new()
+                .suffix(".crt")
+                .tempfile()
+                .map_err(|error| error.to_string())?;
+            snapshot
+                .write_all(&cert.der)
+                .map_err(|error| error.to_string())?;
+            let error = match action {
+                Trust => change_trust(snapshot.path(), true).err(),
+                Untrust => change_trust(snapshot.path(), false).err(),
+                _ => None,
+            };
+            let (status, error) = match trust_status(snapshot.path(), &cert.der) {
+                Ok(status) => (
+                    Some(status),
+                    error.or_else(|| {
+                        (matches!(action, Trust) && !status.1)
+                            .then(|| "系统尚未确认信任，请检查证书管理器中的设置。".into())
+                    }),
+                ),
+                Err(check_error) => (None, error.or(Some(check_error))),
+            };
+            Ok(Outcome::Status {
+                detail: cert.into(),
+                status,
+                error,
+            })
+        }
+        Export(destination, format) => {
+            exports::export(path, &destination, format, &cert)?;
+            Ok(Outcome::Notice(format!(
+                "已导出到 {}",
+                destination.display()
+            )))
+        }
+        AndroidSend(adb, serial) => devices::android_send(&adb, &serial, &cert.der).map(|file| {
+            Outcome::Notice(format!(
+                "已发送证书到 {file}，请在设备的安全设置中选择该文件。"
+            ))
+        }),
+        JavaCheck(jdk) => devices::java_check(&jdk, &cert.der).map(Outcome::Java),
+        JavaTrust(jdk) => devices::java_trust(&jdk, &cert.der).map(Outcome::Java),
+        JavaManual(jdk) => devices::java_manual_command(&jdk, path, &cert.der).map(Outcome::Copied),
+        AndroidDevices(_) | AndroidSettings(_, _) | OpenKeychain | Reveal => unreachable!(),
+    }
 }
 
 fn output(command: &mut Command) -> Result<Output, String> {
@@ -184,20 +266,34 @@ fn checked(result: Output) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn trustworthy(path: &Path) -> Result<bool, String> {
-    Ok(output(
+fn trust_status(path: &Path, der: &[u8]) -> Result<(bool, bool), String> {
+    let trusted = output(
         Command::new("/usr/bin/security")
             .args(["verify-cert", "-L", "-l", "-q", "-p", "ssl", "-c"])
             .arg(path),
     )?
     .status
-    .success())
+    .success();
+    if trusted {
+        return Ok((true, true));
+    }
+    let fingerprint = fingerprint(sha2::Sha256::digest(der)).replace(':', "");
+    let result = output(Command::new("/usr/bin/security").args(["find-certificate", "-a", "-Z"]))?;
+    if !result.status.success() {
+        checked(result)?;
+        unreachable!();
+    }
+    let installed = String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("SHA-256 hash: "))
+        .any(|hash| hash.trim().eq_ignore_ascii_case(&fingerprint));
+    Ok((installed, false))
 }
 
 #[cfg(target_os = "macos")]
-fn change_trust(path: &Path, action: Action) -> Result<(), String> {
+fn change_trust(path: &Path, trust: bool) -> Result<(), String> {
     let mut command = Command::new("/usr/bin/security");
-    if matches!(action, Action::Trust) {
+    if trust {
         let home = std::env::var_os("HOME").ok_or("无法定位用户钥匙串")?;
         let keychain = PathBuf::from(home).join("Library/Keychains/login.keychain-db");
         command
@@ -207,6 +303,13 @@ fn change_trust(path: &Path, action: Action) -> Result<(), String> {
         command.arg("remove-trusted-cert");
     }
     checked(output(command.arg(path))?)
+}
+
+#[cfg(target_os = "macos")]
+fn open_keychain() -> Result<(), String> {
+    checked(output(
+        Command::new("/usr/bin/open").args(["-b", "com.apple.keychainaccess"]),
+    )?)
 }
 
 #[cfg(target_os = "macos")]
@@ -235,7 +338,7 @@ fn store(path: &Path, operation: &str) -> Result<Output, String> {
 }
 
 #[cfg(windows)]
-fn trustworthy(path: &Path) -> Result<bool, String> {
+fn trust_status(path: &Path, _: &[u8]) -> Result<(bool, bool), String> {
     let result = store(
         path,
         r"$ErrorActionPreference='Stop';
@@ -255,12 +358,13 @@ fn trustworthy(path: &Path) -> Result<bool, String> {
         checked(result)?;
         unreachable!();
     }
-    Ok(result.stdout.starts_with(b"trusted"))
+    let trusted = result.stdout.starts_with(b"trusted");
+    Ok((trusted, trusted))
 }
 
 #[cfg(windows)]
-fn change_trust(path: &Path, action: Action) -> Result<(), String> {
-    if matches!(action, Action::Trust) {
+fn change_trust(path: &Path, trust: bool) -> Result<(), String> {
+    if trust {
         return checked(output(
             Command::new(executable("System32/certutil.exe")?)
                 .args(["-user", "-addstore", "Root"])
@@ -282,6 +386,15 @@ fn change_trust(path: &Path, action: Action) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+fn open_keychain() -> Result<(), String> {
+    Command::new(executable("System32/mmc.exe")?)
+        .arg(executable("System32/certmgr.msc")?)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
 fn reveal(path: &Path) -> Result<(), String> {
     let mut selection = OsString::from("/select,");
     selection.push(path);
@@ -293,16 +406,44 @@ fn reveal(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn trustworthy(_: &Path) -> Result<bool, String> {
+fn trust_status(_: &Path, _: &[u8]) -> Result<(bool, bool), String> {
     Err("当前平台不支持系统证书管理".into())
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-fn change_trust(_: &Path, _: Action) -> Result<(), String> {
+fn change_trust(_: &Path, _: bool) -> Result<(), String> {
+    Err("当前平台不支持系统证书管理".into())
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn open_keychain() -> Result<(), String> {
     Err("当前平台不支持系统证书管理".into())
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
 fn reveal(_: &Path) -> Result<(), String> {
     Err("当前平台不支持显示证书文件".into())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use recho_core::native::DesktopEngine;
+
+    #[tokio::test]
+    async fn a_new_local_ca_is_readable_and_not_in_the_keychain() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = DesktopEngine::start(temp.path().join("data"), Some(0))
+            .await
+            .unwrap();
+        let result = perform(&engine.ca_path(), CertificateAction::Check).unwrap();
+        assert!(matches!(result, Outcome::Status {
+            detail,
+            status: Some((false, false)),
+            error: None,
+        } if detail.subject.contains("Recho Local CA")
+            && detail.sha1.len() == 59
+            && detail.sha256.len() == 95));
+        engine.stop().await;
+    }
 }

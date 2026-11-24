@@ -7,7 +7,7 @@ rust-version = "1.95"
 [dependencies]
 eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
 recho-engine = { path = "../engine" }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "io-util", "process"] }
 egui_extras = { version = "=0.36.2", default-features = false }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
@@ -16,9 +16,16 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 futures-util = { version = "0.3", features = ["sink"] }
+md-5 = "0.10"
+qrcode = { version = "0.14", default-features = false }
+same-file = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+tempfile = "3"
+zip = { version = "4.6.1", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSEvent", "NSCell"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["NSObject", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSEvent", "NSCell", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSObject", "NSString", "NSURL"] }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::certificate_ui::Page as CertificatePage;
 use egui_extras::{Column, TableBuilder};
 
 fn icon(code: &str) -> RichText {
@@ -126,6 +127,16 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                         }
                     });
                 });
+                ui.menu_button("工具", |ui| {
+                    if ui.button("MCP").clicked() {
+                        app.mcp.open();
+                        ui.close();
+                    }
+                    if ui.button("访问令牌").clicked() {
+                        app.mcp.open_tokens();
+                        ui.close();
+                    }
+                });
                 ui.menu_button("调试", |ui| {
                     if ui
                         .button(if app.running {
@@ -174,7 +185,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                     ui.separator();
                     proxy_preferences(app, ui);
                 });
-                ui.menu_button("SSL", |ui| {
+                ui.menu_button("证书", |ui| {
                     let mut intercept = app.intercept_tls;
                     if ui.checkbox(&mut intercept, "HTTPS 解密").changed() {
                         app.send(Command::Configure {
@@ -182,10 +193,27 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             intercept_tls: intercept,
                         });
                     }
-                    if ui.button("根证书与连接指引").clicked() {
-                        app.connection_open = true;
-                        ui.close();
+                    ui.separator();
+                    for (page, label) in CertificatePage::MENU {
+                        if ui
+                            .add_enabled(app.ready, egui::Button::new(label))
+                            .clicked()
+                        {
+                            app.certificates.open(page);
+                            ui.close();
+                        }
                     }
+                    ui.menu_button("导出 CA 证书", |ui| {
+                        for (format, label) in CertificatePage::EXPORTS {
+                            if ui
+                                .add_enabled(app.ready, egui::Button::new(label))
+                                .clicked()
+                            {
+                                app.certificates.export(ui.ctx(), format);
+                                ui.close();
+                            }
+                        }
+                    });
                 });
                 ui.menu_button("帮助", |ui| {
                     ui.label("recho 0.1.0 · Rust 桌面验证版");
@@ -350,13 +378,6 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 }
                 return;
             }
-            if app.navigation == Navigation::Tools && app.mcp_open {
-                if ui.small_button("返回抓包").clicked() {
-                    app.mcp_open = false;
-                }
-                app.mcp.show(ui, &app.worker, app.port);
-                return;
-            }
             if app.navigation == Navigation::Tools && app.network_open {
                 if ui.small_button("返回抓包").clicked() {
                     app.network_open = false;
@@ -429,6 +450,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     dialogs(app, ui.ctx());
     app.composer.show_dialogs(ui.ctx(), &app.worker);
     app.rules.dialogs(ui.ctx(), &app.worker);
+    app.mcp.show(ui.ctx(), &app.worker, app.port, app.ready);
 }
 
 fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
@@ -473,7 +495,6 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                             app.rules.open(category);
                             app.rules_open = true;
                             app.network_open = false;
-                            app.mcp_open = false;
                         }
                     }
                 });
@@ -495,12 +516,12 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                 section(ui, "本地工具", |ui| {
                     if ui.button("MCP").clicked() {
                         app.mcp.open();
-                        app.mcp_open = true;
-                        app.rules_open = false;
-                        app.network_open = false;
                     }
-                    if ui.button("证书与连接指引").clicked() {
-                        app.connection_open = true;
+                    if ui.button("访问令牌").clicked() {
+                        app.mcp.open_tokens();
+                    }
+                    if ui.button("安装 CA 证书").clicked() {
+                        app.certificates.open(CertificatePage::Local);
                     }
                 });
             } else {
@@ -509,8 +530,8 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                 });
                 app.library.show_sidebar(ui, &app.worker);
                 section(ui, "设备", |ui| {
-                    if ui.button("证书与连接指引").clicked() {
-                        app.connection_open = true;
+                    if ui.button("安装 CA 证书").clicked() {
+                        app.certificates.open(CertificatePage::Local);
                     }
                 });
                 let apps: BTreeSet<_> =
@@ -604,11 +625,9 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    if icon_button(ui, "\u{e9e0}", "根证书与连接指引", true)
-                                        .on_hover_text("根证书与连接指引")
-                                        .clicked()
+                                    if icon_button(ui, "\u{e9e0}", "安装 CA 证书", true).clicked()
                                     {
-                                        app.connection_open = true;
+                                        app.certificates.open(CertificatePage::Local);
                                     }
                                     let (active, pending) = app.system_proxy;
                                     let title = if active || pending {
@@ -1149,7 +1168,6 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         app.navigate(Navigation::Tools);
         app.rules_open = true;
         app.network_open = false;
-        app.mcp_open = false;
         app.rules.new_for_capture(category, &method, &url);
     }
 }
@@ -1536,10 +1554,8 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
                 }
                 proxy_preferences(app, ui);
                 ui.label("客户端可使用上方代理地址。解密 HTTPS 时需信任本地 CA。");
-                app.certificates.show(ui, &app.ca_path);
-                ui.label(app.ca_path.display().to_string());
-                if ui.button("复制 CA 路径").clicked() {
-                    ctx.copy_text(app.ca_path.display().to_string());
+                if ui.button("安装 CA 证书").clicked() {
+                    app.certificates.open(CertificatePage::Local);
                 }
                 if ui.button("复制代理地址").clicked() {
                     ctx.copy_text(format!("127.0.0.1:{}", app.port));
@@ -1547,6 +1563,8 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
             });
         app.connection_open = open;
     }
+    app.certificates
+        .show(ctx, app.theme.palette(), app.port, app.running, app.ready);
     if app.confirm_proxy_auto {
         let modal = egui::Modal::new(egui::Id::new("proxy_auto_confirmation")).show(ctx, |ui| {
             ui.set_width(400.0);

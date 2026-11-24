@@ -2,7 +2,9 @@ mod certificates;
 #[cfg(target_os = "macos")]
 mod macos;
 
-pub(super) use certificates::Certificates;
+pub(super) use certificates::{
+    CERTIFICATE_DOWNLOAD_URL, CertificateAction, CertificateFormat, Certificates,
+};
 use recho_core::native::DesktopEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

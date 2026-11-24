@@ -1,23 +1,105 @@
 use crate::rules_ui::{finished, label};
 use crate::worker::{RequestHandle, Worker};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use eframe::egui;
 use serde_json::{Value, json};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Client {
+    Claude,
+    Cursor,
+    Codex,
+    VsCode,
+    Windsurf,
+    Copilot,
+    Kiro,
+    Gemini,
+    Trae,
+    Qoder,
+    CodeBuddy,
+    Other,
+}
+
+impl Client {
+    const ALL: [Self; 12] = [
+        Self::Claude,
+        Self::Cursor,
+        Self::Codex,
+        Self::VsCode,
+        Self::Windsurf,
+        Self::Copilot,
+        Self::Kiro,
+        Self::Gemini,
+        Self::Trae,
+        Self::Qoder,
+        Self::CodeBuddy,
+        Self::Other,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Cursor => "Cursor",
+            Self::Codex => "Codex",
+            Self::VsCode => "VS Code",
+            Self::Windsurf => "Windsurf",
+            Self::Copilot => "Copilot",
+            Self::Kiro => "Kiro",
+            Self::Gemini => "Gemini CLI",
+            Self::Trae => "TRAE",
+            Self::Qoder => "Qoder",
+            Self::CodeBuddy => "CodeBuddy",
+            Self::Other => "更多客户端",
+        }
+    }
+
+    fn instructions(self) -> &'static str {
+        match self {
+            Self::Claude => "在终端运行命令，或将配置合并到项目的 .mcp.json。",
+            Self::Cursor => "将配置合并到 ~/.cursor/mcp.json 或项目的 .cursor/mcp.json。",
+            Self::Codex => "在终端运行命令，或将配置合并到 ~/.codex/config.toml。",
+            Self::VsCode => "在命令面板打开用户 MCP 配置，或编辑项目的 .vscode/mcp.json。",
+            Self::Windsurf => {
+                "在 Windsurf 设置中编辑 MCP，或打开 ~/.codeium/windsurf/mcp_config.json。"
+            }
+            Self::Copilot => "在终端运行命令，或将配置合并到 ~/.copilot/mcp-config.json。",
+            Self::Kiro => "在 Kiro 设置中打开 MCP Servers，或编辑项目的 .kiro/settings/mcp.json。",
+            Self::Gemini => {
+                "在终端运行命令，或将配置合并到 ~/.gemini/settings.json 或项目的 .gemini/settings.json。"
+            }
+            Self::Trae => "打开头像下的设置 → MCP，选择添加 → 手动添加。",
+            Self::Qoder => "在 Qoder 设置中打开 MCP，选择手动添加。",
+            Self::CodeBuddy => "在 CodeBuddy 侧栏打开设置 → MCP，选择添加 MCP。",
+            Self::Other => "将配置合并到客户端的 MCP 设置。若客户端使用表单，可分别填写下方字段。",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Page {
+    Settings,
+    Clients,
+    Config(Client),
+    Tokens,
+}
+
 #[derive(Default)]
 pub(super) struct McpUi {
+    page: Option<Page>,
+    token_list: bool,
     access: Option<Value>,
     reply: Option<(Reply, RequestHandle)>,
     selected: String,
     endpoint_host: String,
-    cursor: bool,
-    stdio: bool,
+    http: bool,
     all_tools: bool,
     editor: Option<TokenEdit>,
     confirm_remote: bool,
     error: Option<String>,
-    copied: bool,
+    copied: Option<&'static str>,
 }
 
+#[derive(Clone, Copy)]
 enum Reply {
     Loaded,
     Created,
@@ -33,30 +115,67 @@ enum TokenEdit {
 
 impl McpUi {
     pub(super) fn open(&mut self) {
-        if self.reply.is_none() {
-            self.access = None;
-            self.error = None;
+        if self.is_open() {
+            return;
         }
-        self.copied = false;
+        self.page = Some(Page::Clients);
+        self.access = None;
+        self.error = None;
+        self.copied = None;
+    }
+
+    pub(super) fn open_tokens(&mut self) {
+        if self.is_open() {
+            self.token_list = true;
+        } else {
+            self.open();
+            self.page = Some(Page::Tokens);
+        }
+    }
+
+    pub(super) fn is_open(&self) -> bool {
+        self.page.is_some()
+    }
+
+    pub(super) fn back(&mut self) {
+        if self.reply.is_some() && (self.editor.is_some() || self.confirm_remote) {
+            return;
+        }
+        self.copied = None;
+        self.error = None;
+        if self.editor.take().is_some() || std::mem::take(&mut self.confirm_remote) {
+            return;
+        }
+        if std::mem::take(&mut self.token_list) {
+            return;
+        }
+        self.page = match self.page {
+            Some(Page::Config(_)) => Some(Page::Clients),
+            _ => {
+                self.access = None;
+                None
+            }
+        };
     }
 
     pub(super) fn poll(&mut self) {
-        let Some((kind, result)) = self.reply.as_mut().and_then(|(kind, request)| {
-            finished(request).map(|result| (std::mem::replace(kind, Reply::Loaded), result))
-        }) else {
+        let Some((kind, result)) = self
+            .reply
+            .as_mut()
+            .and_then(|(kind, request)| finished(request).map(|result| (*kind, result)))
+        else {
             return;
         };
         self.reply = None;
         match result {
-            Ok(mut result) => {
+            Ok(result) => {
                 self.error = None;
                 if matches!(kind, Reply::Remote) {
                     self.access = None;
                     self.confirm_remote = false;
                     return;
                 }
-                let tokens = result["tokens"].as_array_mut();
-                if let Some(tokens) = tokens {
+                if let Some(tokens) = result["tokens"].as_array() {
                     if matches!(kind, Reply::Created) {
                         self.selected = tokens.last().map_or("", |item| label(&item["id"])).into();
                     }
@@ -74,9 +193,15 @@ impl McpUi {
                 if matches!(kind, Reply::Created | Reply::Updated) {
                     self.editor = None;
                 }
-                self.access = Some(result);
+                self.access = self.is_open().then_some(result);
             }
-            Err(error) => self.error = Some(error),
+            Err(error) => {
+                if matches!(kind, Reply::Loaded | Reply::Remote) {
+                    self.access = None;
+                    self.confirm_remote = false;
+                }
+                self.error = Some(error);
+            }
         }
     }
 
@@ -88,7 +213,7 @@ impl McpUi {
         body: Value,
         kind: Reply,
     ) {
-        self.copied = false;
+        self.copied = None;
         match worker.request(method, path, body) {
             Ok(reply) => {
                 self.reply = Some((kind, reply));
@@ -98,297 +223,567 @@ impl McpUi {
         }
     }
 
-    pub(super) fn show(&mut self, ui: &mut egui::Ui, worker: &Worker, proxy_port: u16) {
-        if self.access.is_none() && self.reply.is_none() && self.error.is_none() {
-            self.request(worker, "GET", "/mcp-access", Value::Null, Reply::Loaded);
+    fn load(&mut self, worker: &Worker) {
+        self.access = None;
+        self.request(worker, "GET", "/mcp-access", Value::Null, Reply::Loaded);
+    }
+
+    pub(super) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        worker: &Worker,
+        proxy_port: u16,
+        ready: bool,
+    ) {
+        let Some(page) = self.page else { return };
+        if !ready {
+            self.access = None;
+        }
+        if ready && self.access.is_none() && self.reply.is_none() && self.error.is_none() {
+            self.load(worker);
+        }
+        let dialog = egui::Modal::new(egui::Id::new("recho_mcp_dialog")).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.set_width(640.0);
+            if self.editor.is_some() {
+                self.edit_token(ui, worker);
+            } else if self.confirm_remote {
+                ui.heading("允许远程 MCP 访问");
+                ui.label("Recho 将在独立端口监听。只有持有访问令牌的客户端可以连接。");
+                footer(ui, |ui| {
+                    if ui
+                        .add_enabled(self.reply.is_none(), egui::Button::new("启用远程访问"))
+                        .clicked()
+                    {
+                        self.request(
+                            worker,
+                            "PATCH",
+                            "/settings",
+                            remote_patch(true, false),
+                            Reply::Remote,
+                        );
+                    }
+                    if ui.button("取消").clicked() {
+                        self.back();
+                    }
+                });
+            } else if self.token_list {
+                self.tokens(ui, worker, ready);
+            } else {
+                match page {
+                    Page::Settings => self.settings(ui, worker, proxy_port, ready),
+                    Page::Clients => self.clients(ui),
+                    Page::Config(client) => {
+                        self.client_config(ui, worker, client, proxy_port, ready)
+                    }
+                    Page::Tokens => self.tokens(ui, worker, ready),
+                }
+            }
+            if let Some(error) = &self.error {
+                ui.colored_label(ui.visuals().error_fg_color, error);
+            }
+            if let Some(copied) = self.copied {
+                ui.weak(copied);
+            }
+        });
+        if dialog.should_close() {
+            self.back();
+        }
+    }
+
+    fn availability(&mut self, ui: &mut egui::Ui, worker: &Worker, ready: bool) {
+        if !ready {
+            ui.label("正在等待 Recho 引擎就绪…");
+        } else if self.reply.is_some() {
+            ui.spinner();
+        } else if self.access.is_none() && ui.button("重新读取访问配置").clicked() {
+            self.load(worker);
+        }
+    }
+
+    fn settings(&mut self, ui: &mut egui::Ui, worker: &Worker, proxy_port: u16, ready: bool) {
+        ui.heading("MCP 服务");
+        ui.weak("将 Recho 接入 AI 客户端，查询抓包和调试数据。");
+        ui.separator();
+        self.availability(ui, worker, ready);
+        let mut enabled = self
+            .access
+            .as_ref()
+            .is_some_and(|access| access["remoteEnabled"] == true);
+        let busy = self.reply.is_some() || self.access.is_none();
+        if ui
+            .add_enabled(!busy, egui::Checkbox::new(&mut enabled, "允许远程访问"))
+            .changed()
+        {
+            if enabled {
+                self.confirm_remote = true;
+            } else {
+                self.request(
+                    worker,
+                    "PATCH",
+                    "/settings",
+                    remote_patch(false, true),
+                    Reply::Remote,
+                );
+            }
+        }
+        if proxy_port != 0 {
+            ui.label(format!("本机端口  {proxy_port}"));
+        }
+        if enabled
+            && let Some(port) = self
+                .access
+                .as_ref()
+                .and_then(|access| access["remotePort"].as_u64())
+        {
+            ui.label(format!("远程端口  {port}"));
         }
         ui.horizontal(|ui| {
-            ui.heading("MCP");
-            if ui
-                .add_enabled(self.reply.is_none(), egui::Button::new("刷新访问配置"))
-                .clicked()
-            {
-                self.request(worker, "GET", "/mcp-access", Value::Null, Reply::Loaded);
+            self.manage_tokens(ui, worker, ready);
+        });
+        footer(ui, |ui| {
+            if ui.button("关闭").clicked() {
+                self.back();
+            }
+            if ui.button("配置 MCP 客户端").clicked() {
+                self.page = Some(Page::Clients);
             }
         });
-        if let Some(error) = &self.error {
-            ui.colored_label(egui::Color32::LIGHT_RED, error);
-        }
-        let Some(access) = &self.access else {
-            if self.reply.is_some() {
-                ui.spinner();
-            }
-            return;
-        };
-        let busy = self.reply.is_some();
-        let remote = access["remoteEnabled"] == true;
-        let remote_port = access["remotePort"]
-            .as_u64()
-            .and_then(|port| u16::try_from(port).ok());
-        let addresses = access["addresses"].as_array();
-        let tokens = access["tokens"].as_array().map_or(&[][..], Vec::as_slice);
-        let selected_name = tokens
-            .iter()
-            .find(|item| item["id"] == self.selected)
-            .map_or("选择令牌", |item| label(&item["name"]));
-        let mut request = None;
-        ui.horizontal_wrapped(|ui| {
-            let mut enabled = remote;
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Checkbox::new(&mut enabled, "允许远程 MCP 访问"),
-                )
-                .changed()
-            {
-                if enabled {
-                    self.confirm_remote = true;
-                } else {
-                    request = Some((
-                        "PATCH",
-                        "/settings".into(),
-                        remote_patch(false, true),
-                        Reply::Remote,
-                    ));
-                }
-            }
-            if remote && let Some(port) = remote_port {
-                ui.label(format!("远程端口 {port}"));
-            }
-        });
+    }
+
+    fn clients(&mut self, ui: &mut egui::Ui) {
+        ui.heading("配置 MCP 客户端");
+        ui.weak("选择要连接 Recho 的客户端");
         ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("访问令牌");
-            ui.add_enabled_ui(!busy, |ui| {
-                egui::ComboBox::from_id_salt("mcp_token")
-                    .selected_text(selected_name)
-                    .show_ui(ui, |ui| {
-                        for token in tokens {
-                            let id = label(&token["id"]);
-                            if ui
-                                .selectable_label(self.selected == id, label(&token["name"]))
-                                .clicked()
-                            {
-                                self.selected = id.to_owned();
-                                self.copied = false;
-                            }
-                        }
-                    });
-                if ui.button("新建令牌").clicked() {
-                    self.editor = Some(TokenEdit::New(String::new()));
-                }
-                if let Some(token) = tokens.iter().find(|item| item["id"] == self.selected) {
-                    let id = label(&token["id"]);
-                    let name = label(&token["name"]);
-                    if ui.button("重命名令牌").clicked() {
-                        self.editor = Some(TokenEdit::Rename {
-                            id: id.to_owned(),
-                            name: name.to_owned(),
-                        });
+        egui::Grid::new("mcp_clients")
+            .num_columns(3)
+            .spacing([8.0, 8.0])
+            .show(ui, |ui| {
+                for (index, client) in Client::ALL.into_iter().enumerate() {
+                    if ui
+                        .add_sized([205.0, 48.0], egui::Button::new(client.name()))
+                        .clicked()
+                    {
+                        self.page = Some(Page::Config(client));
+                        self.http = false;
+                        self.copied = None;
                     }
-                    if ui.button("撤销令牌").clicked() {
-                        self.editor = Some(TokenEdit::Revoke {
-                            id: id.to_owned(),
-                            name: name.to_owned(),
-                        });
-                    }
-                    if ui.button("复制令牌").clicked() {
-                        ui.ctx().copy_text(label(&token["token"]).to_owned());
-                        self.copied = true;
+                    if index % 3 == 2 {
+                        ui.end_row();
                     }
                 }
             });
-        });
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("客户端配置");
-            self.copied &= !ui
-                .selectable_value(&mut self.cursor, false, "Codex")
-                .changed();
-            self.copied &= !ui
-                .selectable_value(&mut self.cursor, true, "Cursor")
-                .changed();
-            ui.separator();
-            self.copied &= !ui
-                .selectable_value(&mut self.stdio, false, "HTTP")
-                .changed();
-            self.copied &= !ui
-                .selectable_value(&mut self.stdio, true, "Stdio")
-                .changed();
-        });
-        ui.horizontal_wrapped(|ui| {
-            let mut scope = if self.all_tools { "all" } else { "minimal" };
-            egui::ComboBox::from_label("工具范围")
-                .selected_text(scope)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut scope, "minimal", "minimal");
-                    ui.selectable_value(&mut scope, "all", "all");
-                });
-            self.all_tools = scope == "all";
-            if remote && let Some(addresses) = addresses {
-                egui::ComboBox::from_label("连接地址")
-                    .selected_text(if self.endpoint_host.is_empty() {
-                        "本机"
-                    } else {
-                        &self.endpoint_host
-                    })
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_label(self.endpoint_host.is_empty(), "本机")
-                            .clicked()
-                        {
-                            self.endpoint_host.clear();
-                        }
-                        for addr in addresses {
-                            if let Some(addr) = addr.as_str().filter(|addr| *addr != "127.0.0.1") {
-                                if ui
-                                    .selectable_label(self.endpoint_host == addr, addr)
-                                    .clicked()
-                                {
-                                    self.endpoint_host = addr.to_owned();
-                                }
-                            }
-                        }
-                    });
+        footer(ui, |ui| {
+            if ui.button("关闭").clicked() {
+                self.back();
+            }
+            if ui.button("服务设置").clicked() {
+                self.page = Some(Page::Settings);
             }
         });
-        let (host, port) = if self.endpoint_host.is_empty() || !remote {
+    }
+
+    fn manage_tokens(&mut self, ui: &mut egui::Ui, worker: &Worker, ready: bool) {
+        if ui.button("管理访问令牌").clicked() {
+            self.token_list = true;
+            self.copied = None;
+            if ready && self.reply.is_none() {
+                self.load(worker);
+            }
+        }
+    }
+
+    fn client_config(
+        &mut self,
+        ui: &mut egui::Ui,
+        worker: &Worker,
+        client: Client,
+        proxy_port: u16,
+        ready: bool,
+    ) {
+        ui.heading(format!("将 Recho 连接到 {}", client.name()));
+        ui.horizontal(|ui| {
+            for (http, title) in [(false, "Stdio"), (true, "HTTP")] {
+                if ui.selectable_value(&mut self.http, http, title).changed() {
+                    self.copied = None;
+                }
+            }
+        });
+        ui.separator();
+        ui.label(client.instructions());
+        self.availability(ui, worker, ready);
+        let access = self.access.clone().unwrap_or(Value::Null);
+        let tokens = access["tokens"].as_array().map_or(&[][..], Vec::as_slice);
+        ui.horizontal(|ui| {
+            ui.label("访问令牌");
+            egui::ComboBox::from_id_salt("mcp_token")
+                .selected_text(
+                    tokens
+                        .iter()
+                        .find(|item| item["id"] == self.selected)
+                        .map_or("未选择", |item| label(&item["name"])),
+                )
+                .show_ui(ui, |ui| {
+                    for token in tokens {
+                        if ui
+                            .selectable_value(
+                                &mut self.selected,
+                                label(&token["id"]).into(),
+                                label(&token["name"]),
+                            )
+                            .changed()
+                        {
+                            self.copied = None;
+                        }
+                    }
+                });
+            self.manage_tokens(ui, worker, ready);
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("工具范围");
+            egui::ComboBox::from_id_salt("mcp_scope")
+                .selected_text(scope(self.all_tools))
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(&mut self.all_tools, false, "minimal · 常用工具")
+                        .changed()
+                        || ui
+                            .selectable_value(&mut self.all_tools, true, "all · 全部工具")
+                            .changed()
+                    {
+                        self.copied = None;
+                    }
+                });
+            ui.label("连接地址");
+            egui::ComboBox::from_id_salt("mcp_endpoint")
+                .selected_text(if self.endpoint_host.is_empty() {
+                    "本机 127.0.0.1"
+                } else {
+                    &self.endpoint_host
+                })
+                .show_ui(ui, |ui| {
+                    if ui
+                        .selectable_value(&mut self.endpoint_host, String::new(), "本机 127.0.0.1")
+                        .changed()
+                    {
+                        self.copied = None;
+                    }
+                    for addr in access["addresses"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .filter(|addr| *addr != "127.0.0.1")
+                    {
+                        if ui
+                            .add_enabled(
+                                access["remoteEnabled"] == true,
+                                egui::Button::selectable(self.endpoint_host == addr, addr),
+                            )
+                            .clicked()
+                        {
+                            self.endpoint_host = addr.to_owned();
+                            self.copied = None;
+                        }
+                    }
+                });
+        });
+        let (host, port) = if self.endpoint_host.is_empty() || access["remoteEnabled"] != true {
             ("127.0.0.1", proxy_port)
         } else {
-            (self.endpoint_host.as_str(), remote_port.unwrap_or_default())
+            (
+                &*self.endpoint_host,
+                access["remotePort"]
+                    .as_u64()
+                    .and_then(|port| u16::try_from(port).ok())
+                    .unwrap_or_default(),
+            )
         };
         let token = tokens
             .iter()
             .find(|item| item["id"] == self.selected)
             .map(|item| label(&item["token"]));
-        let executable = self.stdio.then(std::env::current_exe).and_then(Result::ok);
+        let executable = std::env::current_exe().ok();
         let path = executable.as_deref().and_then(std::path::Path::to_str);
-        let can_copy = token.is_some() && port != 0 && (!self.stdio || path.is_some()) && !busy;
-        if let Some(preview) = config(
-            self.cursor,
-            self.stdio,
+        let preview = Config::new(
+            client,
+            self.http,
             host,
             port,
             scope(self.all_tools),
             path,
             "<ACCESS_TOKEN>",
-        ) {
-            egui::ScrollArea::both().max_height(250.0).show(ui, |ui| {
-                ui.monospace(preview);
-            });
-        }
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(can_copy, egui::Button::new("复制客户端配置"))
-                .clicked()
-            {
-                if let Some(text) = config(
-                    self.cursor,
-                    self.stdio,
+        );
+        let actual = token
+            .filter(|_| self.reply.is_none() && self.access.is_some())
+            .and_then(|token| {
+                Config::new(
+                    client,
+                    self.http,
                     host,
                     port,
                     scope(self.all_tools),
                     path,
-                    token.unwrap(),
-                ) {
-                    ui.ctx().copy_text(text);
-                    self.copied = true;
-                }
-            }
-            if self.copied {
-                ui.label("已复制");
-            }
-        });
-        ui.weak(if self.cursor {
-            "合并到 Cursor 的 mcp.json。复制的配置包含访问令牌。"
-        } else {
-            "合并到 Codex 的 config.toml。复制的配置包含访问令牌。"
-        });
-        if self.confirm_remote {
-            let confirm =
-                egui::Modal::new(egui::Id::new("mcp_remote_confirm")).show(ui.ctx(), |ui| {
-                    ui.heading("允许远程 MCP 访问");
-                    ui.label("将在独立端口监听，只有持有访问令牌的客户端可以连接。");
-                    ui.horizontal(|ui| {
-                        (
-                            ui.button("取消").clicked(),
-                            ui.add_enabled(!busy, egui::Button::new("允许连接"))
-                                .clicked(),
-                        )
-                    })
-                    .inner
-                });
-            if confirm.inner.1 {
-                self.confirm_remote = false;
-                request = Some((
-                    "PATCH",
-                    "/settings".into(),
-                    remote_patch(true, false),
-                    Reply::Remote,
-                ));
-            } else if confirm.inner.0 || confirm.should_close() {
-                self.confirm_remote = false;
-            }
-        }
-        if let Some(editor) = &mut self.editor {
-            let response = egui::Modal::new(egui::Id::new("mcp_token_edit")).show(ui.ctx(), |ui| {
-                let (title, name, revoke) = match editor {
-                    TokenEdit::New(name) => ("新建令牌", name, false),
-                    TokenEdit::Rename { name, .. } => ("重命名令牌", name, false),
-                    TokenEdit::Revoke { name, .. } => ("撤销令牌", name, true),
-                };
-                ui.heading(title);
-                if revoke {
-                    ui.label(format!("撤销「{name}」将使使用它的客户端失去访问权限。"));
-                } else {
-                    ui.add_enabled(
-                        !busy,
-                        egui::TextEdit::singleline(name).hint_text("令牌名称"),
-                    );
-                }
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                }
-                ui.horizontal(|ui| {
-                    let cancel = ui.add_enabled(!busy, egui::Button::new("取消")).clicked();
-                    let save = ui
-                        .add_enabled(
-                            !busy && !name.trim().is_empty(),
-                            egui::Button::new(if revoke { "撤销" } else { "保存" }),
-                        )
-                        .clicked();
-                    (cancel, save)
-                })
-                .inner
+                    token,
+                )
             });
-            if response.inner.1 {
-                request = Some(match editor {
-                    TokenEdit::New(name) => (
-                        "POST",
-                        "/mcp-access".into(),
-                        json!({"name": name}),
-                        Reply::Created,
-                    ),
-                    TokenEdit::Rename { id, name } => (
-                        "PATCH",
-                        format!("/mcp-access/{id}"),
-                        json!({"name": name}),
-                        Reply::Updated,
-                    ),
-                    TokenEdit::Revoke { id, .. } => (
-                        "DELETE",
-                        format!("/mcp-access/{id}"),
-                        json!({}),
-                        Reply::Updated,
-                    ),
+        let max_height = (ui.ctx().content_rect().height() - 285.0).clamp(140.0, 355.0);
+        egui::ScrollArea::vertical()
+            .id_salt((client.name(), self.http))
+            .max_height(max_height)
+            .show(ui, |ui| {
+                if let Some(preview) = preview {
+                    if let Some(command) = preview.command() {
+                        code_block(
+                            ui,
+                            "终端命令",
+                            &command,
+                            actual.as_ref().and_then(Config::command),
+                            "复制命令",
+                            &mut self.copied,
+                        );
+                    }
+                    code_block(
+                        ui,
+                        "手动配置",
+                        &preview.text(),
+                        actual.as_ref().map(Config::text),
+                        "复制配置",
+                        &mut self.copied,
+                    );
+                    let (title, value) = if self.http {
+                        ("服务器 URL", preview.endpoint())
+                    } else {
+                        ("辅助程序路径", path.unwrap_or_default())
+                    };
+                    code_block(
+                        ui,
+                        title,
+                        value,
+                        Some(value.into()),
+                        "复制地址或路径",
+                        &mut self.copied,
+                    );
+                } else {
+                    ui.label("等待代理端口或 Stdio 辅助程序可用。");
+                }
+            });
+        if token.is_none() && self.access.is_some() {
+            ui.weak("请先新建访问令牌，然后复制命令或配置。");
+        }
+        if self.http && access["remoteEnabled"] != true {
+            ui.weak("其他设备连接时，请在服务设置中启用远程访问并选择连接地址。");
+        }
+        footer(ui, |ui| {
+            if ui.button("完成").clicked() {
+                self.page = None;
+                self.access = None;
+                self.copied = None;
+            }
+            if ui.button("返回").clicked() {
+                self.back();
+            }
+            if matches!(client, Client::Cursor | Client::VsCode) {
+                let link = actual.as_ref().and_then(Config::install_link);
+                if ui
+                    .add_enabled(link.is_some(), egui::Button::new("在客户端安装"))
+                    .clicked()
+                    && let Some(link) = link
+                    && !open_install_link(&link)
+                {
+                    self.error = Some(format!(
+                        "无法打开 {}。可复制配置后手动安装。",
+                        client.name()
+                    ));
+                }
+            }
+        });
+    }
+
+    fn tokens(&mut self, ui: &mut egui::Ui, worker: &Worker, ready: bool) {
+        ui.heading("管理访问令牌");
+        ui.separator();
+        self.availability(ui, worker, ready);
+        let mut edit = None;
+        if let Some(tokens) = self
+            .access
+            .as_ref()
+            .and_then(|access| access["tokens"].as_array())
+        {
+            if tokens.is_empty() {
+                ui.weak("暂无访问令牌");
+            }
+            egui::ScrollArea::vertical()
+                .max_height(290.0)
+                .show(ui, |ui| {
+                    for token in tokens {
+                        let id = label(&token["id"]);
+                        let name = label(&token["name"]);
+                        let credential = label(&token["token"]);
+                        ui.push_id(id, |ui| {
+                            ui.add_enabled_ui(self.reply.is_none(), |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.strong(name);
+                                        ui.monospace(mask_token(credential));
+                                        ui.weak(token["lastUsedAt"].as_str().map_or_else(
+                                            || "无访问记录".to_owned(),
+                                            |last_used| format!("最近访问  {last_used}"),
+                                        ));
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.button("删除").clicked() {
+                                                edit = Some(TokenEdit::Revoke {
+                                                    id: id.into(),
+                                                    name: name.into(),
+                                                });
+                                            }
+                                            if ui.button("复制").clicked() {
+                                                ui.ctx().copy_text(credential.into());
+                                                self.copied = Some("已复制令牌");
+                                            }
+                                            if ui.button("重命名").clicked() {
+                                                edit = Some(TokenEdit::Rename {
+                                                    id: id.into(),
+                                                    name: name.into(),
+                                                });
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+                        });
+                        ui.separator();
+                    }
                 });
-            } else if !busy && (response.inner.0 || response.should_close()) {
-                self.editor = None;
+        }
+        footer(ui, |ui| {
+            if ui.button("关闭").clicked() {
+                self.back();
+            }
+            if ui
+                .add_enabled(
+                    self.access.is_some() && self.reply.is_none(),
+                    egui::Button::new("新建令牌"),
+                )
+                .clicked()
+            {
+                edit = Some(TokenEdit::New(String::new()));
+            }
+        });
+        if edit.is_some() {
+            self.error = None;
+            self.copied = None;
+            self.editor = edit;
+        }
+    }
+
+    fn edit_token(&mut self, ui: &mut egui::Ui, worker: &Worker) {
+        let Some(editor) = &mut self.editor else {
+            return;
+        };
+        let (title, name, revoke) = match editor {
+            TokenEdit::New(name) => ("新建访问令牌", name, false),
+            TokenEdit::Rename { name, .. } => ("重命名访问令牌", name, false),
+            TokenEdit::Revoke { name, .. } => ("删除访问令牌", name, true),
+        };
+        ui.heading(title);
+        let busy = self.reply.is_some();
+        if revoke {
+            ui.label(format!(
+                "删除「{name}」后，使用它的客户端将立即失去访问权限。"
+            ));
+        } else {
+            ui.label("令牌名称");
+            let field = ui.add_enabled(
+                !busy,
+                egui::TextEdit::singleline(name)
+                    .hint_text("请输入名称")
+                    .desired_width(600.0),
+            );
+            if !ui.memory(|memory| memory.focused().is_some()) {
+                field.request_focus();
             }
         }
-        if let Some((method, path, body, kind)) = request {
+        let valid = revoke
+            || (!name.trim().is_empty()
+                && name.trim().chars().count() <= 100
+                && !name.trim().chars().any(char::is_control));
+        let (save, cancel) = footer(ui, |ui| {
+            let save = ui
+                .add_enabled(
+                    !busy && valid,
+                    egui::Button::new(if revoke { "删除" } else { "完成" }),
+                )
+                .clicked();
+            let cancel = ui.add_enabled(!busy, egui::Button::new("取消")).clicked();
+            (save, cancel)
+        });
+        if save {
+            let (method, path, body, kind) = match editor {
+                TokenEdit::New(name) => (
+                    "POST",
+                    "/mcp-access".into(),
+                    json!({"name": name}),
+                    Reply::Created,
+                ),
+                TokenEdit::Rename { id, name } => (
+                    "PATCH",
+                    format!("/mcp-access/{id}"),
+                    json!({"name": name}),
+                    Reply::Updated,
+                ),
+                TokenEdit::Revoke { id, .. } => (
+                    "DELETE",
+                    format!("/mcp-access/{id}"),
+                    json!({}),
+                    Reply::Updated,
+                ),
+            };
             self.request(worker, method, path, body, kind);
+        } else if cancel {
+            self.back();
         }
+    }
+}
+
+fn footer<T>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> T) -> T {
+    ui.separator();
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), contents)
+        .inner
+}
+
+fn code_block(
+    ui: &mut egui::Ui,
+    title: &str,
+    preview: &str,
+    copy: Option<String>,
+    button: &'static str,
+    feedback: &mut Option<&'static str>,
+) {
+    ui.horizontal(|ui| {
+        ui.strong(title);
+        if ui
+            .add_enabled(copy.is_some(), egui::Button::new(button))
+            .clicked()
+            && let Some(copy) = copy
+        {
+            ui.ctx().copy_text(copy);
+            *feedback = Some("已复制到剪贴板");
+        }
+    });
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.add(egui::Label::new(egui::RichText::new(preview).monospace()).wrap());
+    });
+}
+
+fn mask_token(token: &str) -> String {
+    match (token.get(..4), token.get(token.len().saturating_sub(4)..)) {
+        (Some(start), Some(end)) if token.len() >= 12 => format!("{start}••••••••{end}"),
+        _ => "••••••••".into(),
     }
 }
 
@@ -400,34 +795,230 @@ fn remote_patch(enabled: bool, expected: bool) -> Value {
     json!({"mcpRemoteEnabled": enabled, "_expected": {"mcpRemoteEnabled": expected}})
 }
 
-fn config(
-    cursor: bool,
-    stdio: bool,
-    host: &str,
-    port: u16,
-    scope: &str,
-    path: Option<&str>,
-    token: &str,
-) -> Option<String> {
-    let value = if stdio {
-        json!({ "command": path?, "args": ["--mcp", "--host", host, "--port", &port.to_string(), "--scope", scope], "env": {"RECHO_TOKEN": token} })
-    } else {
-        let host = url::Host::parse(host).ok()?;
-        json!({"url": format!("http://{host}:{port}/mcp?scope={scope}"), "headers": {"Authorization": format!("Bearer {token}")}})
-    };
-    Some(if cursor {
-        serde_json::to_string_pretty(&json!({"mcpServers": {"recho": value}})).ok()?
-    } else if stdio {
-        format!(
-            "[mcp_servers.recho]\ncommand = {}\nargs = {}\nenv = {{ RECHO_TOKEN = {} }}",
-            value["command"], value["args"], value["env"]["RECHO_TOKEN"]
+struct Config {
+    client: Client,
+    http: bool,
+    server: Value,
+}
+
+impl Config {
+    fn new(
+        client: Client,
+        http: bool,
+        host: &str,
+        port: u16,
+        scope: &str,
+        path: Option<&str>,
+        token: &str,
+    ) -> Option<Self> {
+        if port == 0 {
+            return None;
+        }
+        let server = if http {
+            let host = url::Host::parse(host).ok()?;
+            let endpoint = format!("http://{host}:{port}/mcp?scope={scope}");
+            let mut server =
+                json!({"url": endpoint, "headers": {"Authorization": format!("Bearer {token}")}});
+            let endpoint_key = match client {
+                Client::Gemini => "httpUrl",
+                Client::Windsurf => "serverUrl",
+                _ => "url",
+            };
+            if endpoint_key != "url" {
+                let endpoint = server.as_object_mut()?.remove("url")?;
+                server[endpoint_key] = endpoint;
+            }
+            match client {
+                Client::Claude
+                | Client::Cursor
+                | Client::VsCode
+                | Client::Copilot
+                | Client::CodeBuddy => server["type"] = json!("http"),
+                Client::Qoder => server["type"] = json!("streamable-http"),
+                _ => {}
+            }
+            server
+        } else {
+            let mut server = json!({ "command": path?, "args": ["--mcp", "--host", host, "--port", &port.to_string(), "--scope", scope], "env": {"RECHO_TOKEN": token} });
+            if matches!(
+                client,
+                Client::Claude | Client::VsCode | Client::Copilot | Client::CodeBuddy
+            ) {
+                server["type"] = json!("stdio");
+            }
+            server
+        };
+        let mut config = Self {
+            client,
+            http,
+            server,
+        };
+        match client {
+            Client::Copilot => config.server["tools"] = json!(["*"]),
+            Client::Kiro => config.server["disabled"] = json!(false),
+            _ => {}
+        }
+        Some(config)
+    }
+
+    fn endpoint(&self) -> &str {
+        label(
+            &self.server[match self.client {
+                Client::Gemini => "httpUrl",
+                Client::Windsurf => "serverUrl",
+                _ => "url",
+            }],
         )
+    }
+
+    fn text(&self) -> String {
+        if self.client == Client::Codex {
+            if self.http {
+                format!(
+                    "[mcp_servers.recho]\nurl = {}\nhttp_headers = {{ Authorization = {} }}",
+                    self.server["url"], self.server["headers"]["Authorization"]
+                )
+            } else {
+                format!(
+                    "[mcp_servers.recho]\ncommand = {}\nargs = {}\nenv = {{ RECHO_TOKEN = {} }}",
+                    self.server["command"], self.server["args"], self.server["env"]["RECHO_TOKEN"]
+                )
+            }
+        } else {
+            let root = if self.client == Client::VsCode {
+                "servers"
+            } else {
+                "mcpServers"
+            };
+            serde_json::to_string_pretty(&json!({root: {"recho": self.server}}))
+                .expect("JSON values are serializable")
+        }
+    }
+
+    fn command(&self) -> Option<String> {
+        if self.http {
+            let url = shell_quote(self.endpoint());
+            let authorization = label(&self.server["headers"]["Authorization"]);
+            let header = shell_quote(&format!("Authorization: {authorization}"));
+            match self.client {
+                Client::Claude => Some(format!(
+                    "claude mcp add --transport http recho {url} --header {header}"
+                )),
+                Client::Gemini => Some(format!(
+                    "gemini mcp add --transport http --header {header} recho {url}"
+                )),
+                Client::Codex => {
+                    let token =
+                        label(&self.server["headers"]["Authorization"]).strip_prefix("Bearer ")?;
+                    let setup = if cfg!(windows) {
+                        "$env:RECHO_TOKEN = "
+                    } else {
+                        "export RECHO_TOKEN="
+                    };
+                    Some(format!(
+                        "{setup}{}\ncodex mcp add recho --url {url} --bearer-token-env-var RECHO_TOKEN",
+                        shell_quote(token)
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            let command = shell_quote(label(&self.server["command"]));
+            let args = self.server["args"]
+                .as_array()?
+                .iter()
+                .map(|arg| shell_quote(label(arg)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let env = shell_quote(&format!(
+                "RECHO_TOKEN={}",
+                label(&self.server["env"]["RECHO_TOKEN"])
+            ));
+            let launch = if cfg!(windows) { "& " } else { "" };
+            match self.client {
+                Client::Claude => Some(format!(
+                    "claude mcp add --transport stdio recho --env {env} -- {command} {args}"
+                )),
+                Client::Gemini => Some(format!(
+                    "gemini mcp add --transport stdio --env {env} recho {command} -- {args}"
+                )),
+                Client::Codex => Some(format!(
+                    "codex mcp add recho --env {env} -- {command} {args}"
+                )),
+                Client::Other => {
+                    let token = shell_quote(label(&self.server["env"]["RECHO_TOKEN"]));
+                    let setup = if cfg!(windows) {
+                        "$env:RECHO_TOKEN = "
+                    } else {
+                        "export RECHO_TOKEN="
+                    };
+                    Some(format!("{setup}{token}\n{launch}{command} {args}"))
+                }
+                _ => None,
+            }
+        }
+    }
+
+    fn install_link(&self) -> Option<url::Url> {
+        match self.client {
+            Client::Cursor => {
+                let mut url =
+                    url::Url::parse("cursor://anysphere.cursor-deeplink/mcp/install").ok()?;
+                url.query_pairs_mut()
+                    .append_pair("name", "recho")
+                    .append_pair("config", &STANDARD.encode(self.server.to_string()));
+                Some(url)
+            }
+            Client::VsCode => {
+                let mut server = self.server.clone();
+                server["name"] = json!("recho");
+                let payload = url::form_urlencoded::byte_serialize(server.to_string().as_bytes())
+                    .collect::<String>()
+                    .replace('+', "%20");
+                url::Url::parse(&format!("vscode:mcp/install?{payload}")).ok()
+            }
+            _ => None,
+        }
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if cfg!(windows) {
+        format!("'{}'", value.replace('\'', "''"))
     } else {
-        format!(
-            "[mcp_servers.recho]\nurl = {}\nhttp_headers = {{ Authorization = {} }}",
-            value["url"], value["headers"]["Authorization"]
-        )
-    })
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_install_link(url: &url::Url) -> bool {
+    use objc2_app_kit::NSWorkspace;
+    use objc2_foundation::{NSString, NSURL};
+    NSURL::URLWithString(&NSString::from_str(url.as_str()))
+        .is_some_and(|url| NSWorkspace::sharedWorkspace().openURL(&url))
+}
+
+#[cfg(target_os = "windows")]
+fn open_install_link(url: &url::Url) -> bool {
+    // PowerShell's call operator uses the URI as data, including any query separators.
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process -FilePath $env:RECHO_MCP_INSTALL_URI",
+        ])
+        .env("RECHO_MCP_INSTALL_URI", url.as_str())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn open_install_link(url: &url::Url) -> bool {
+    std::process::Command::new("xdg-open")
+        .arg(url.as_str())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[cfg(test)]
@@ -435,34 +1026,84 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_configs_share_endpoint_scope_and_token() {
-        let value = config(
-            true,
-            true,
-            "127.0.0.1",
-            9988,
-            "minimal",
-            Some("/app/recho"),
-            "fixture",
-        )
-        .unwrap();
-        let value: Value = serde_json::from_str(&value).unwrap();
-        let server = &value["mcpServers"]["recho"];
-        assert_eq!(
-            server["args"],
-            json!([
-                "--mcp",
-                "--host",
+    fn clients_share_the_authenticated_endpoint_and_use_their_config_keys() {
+        let fixture = |client, http| {
+            Config::new(
+                client,
+                http,
                 "127.0.0.1",
-                "--port",
-                "9988",
-                "--scope",
-                "minimal"
-            ])
+                9988,
+                "minimal",
+                Some("/App 'path'/recho"),
+                "fixture",
+            )
+            .unwrap()
+        };
+        for client in Client::ALL
+            .into_iter()
+            .filter(|client| *client != Client::Codex)
+        {
+            let stdio = fixture(client, false);
+            let value: Value = serde_json::from_str(&stdio.text()).unwrap();
+            let root = if client == Client::VsCode {
+                "servers"
+            } else {
+                "mcpServers"
+            };
+            assert_eq!(
+                value[root]["recho"]["args"],
+                json!([
+                    "--mcp",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "9988",
+                    "--scope",
+                    "minimal"
+                ])
+            );
+            assert_eq!(value[root]["recho"]["env"]["RECHO_TOKEN"], "fixture");
+            let http = fixture(client, true);
+            let value: Value = serde_json::from_str(&http.text()).unwrap();
+            let field = match client {
+                Client::Gemini => "httpUrl",
+                Client::Windsurf => "serverUrl",
+                _ => "url",
+            };
+            assert_eq!(
+                value[root]["recho"][field],
+                "http://127.0.0.1:9988/mcp?scope=minimal"
+            );
+            assert_eq!(
+                value[root]["recho"]["headers"]["Authorization"],
+                "Bearer fixture"
+            );
+        }
+        let codex = fixture(Client::Codex, true);
+        assert!(codex.text().contains("Bearer fixture"));
+        assert!(
+            codex
+                .command()
+                .unwrap()
+                .contains("--bearer-token-env-var RECHO_TOKEN")
         );
-        assert_eq!(server["env"]["RECHO_TOKEN"], "fixture");
-        let http = config(false, false, "127.0.0.1", 9988, "minimal", None, "fixture").unwrap();
-        assert!(http.contains("http://127.0.0.1:9988/mcp?scope=minimal"));
-        assert!(http.contains("Bearer fixture"));
+        let cursor = fixture(Client::Cursor, false);
+        let link = cursor.install_link().unwrap();
+        let payload = link
+            .query_pairs()
+            .find(|(key, _)| key == "config")
+            .unwrap()
+            .1;
+        let decoded: Value =
+            serde_json::from_slice(&STANDARD.decode(payload.as_bytes()).unwrap()).unwrap();
+        assert_eq!(decoded, cursor.server);
+        let vscode = fixture(Client::VsCode, true).install_link().unwrap();
+        assert!(vscode.query().unwrap().contains("Bearer%20fixture"));
+    }
+
+    #[test]
+    fn token_mask_only_shows_prefix_and_suffix() {
+        assert_eq!(mask_token("1234567890abcdef"), "1234••••••••cdef");
+        assert_eq!(mask_token("secret"), "••••••••");
     }
 }

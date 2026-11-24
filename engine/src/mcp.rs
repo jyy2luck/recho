@@ -25,6 +25,12 @@ pub struct AccessToken {
     pub id: String,
     pub name: String,
     pub token: String,
+    #[serde(
+        default,
+        rename = "lastUsedAt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub struct AccessTokens {
@@ -74,6 +80,7 @@ impl AccessTokens {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "默认令牌".into(),
                 token: token.into(),
+                last_used_at: None,
             });
             store.save(&store.items)?;
         } else {
@@ -112,13 +119,35 @@ impl AccessTokens {
         )
     }
 
-    pub fn authorized(&self, supplied: &[u8]) -> bool {
-        use subtle::ConstantTimeEq;
-        let mut matched = subtle::Choice::from(0);
-        for item in &self.items {
-            matched |= supplied.ct_eq(format!("Bearer {}", item.token).as_bytes());
+    pub fn authorized_token(&self, supplied: &[u8]) -> Option<&str> {
+        use subtle::{ConditionallySelectable, ConstantTimeEq};
+        let mut matched = 0;
+        for (index, item) in self.items.iter().enumerate() {
+            let equal = supplied.ct_eq(format!("Bearer {}", item.token).as_bytes());
+            matched = u32::conditional_select(&matched, &(index as u32 + 1), equal);
         }
-        bool::from(matched)
+        self.items
+            .get((matched as usize).wrapping_sub(1))
+            .map(|item| item.id.as_str())
+    }
+
+    pub fn record_access(&mut self, id: &str) -> Result<()> {
+        let now = chrono::Utc::now();
+        let Some(index) = self.items.iter().position(|item| item.id == id) else {
+            return Ok(());
+        };
+        if self.items[index]
+            .last_used_at
+            .is_none_or(|time| now.signed_duration_since(time).num_seconds().abs() >= 60)
+        {
+            // shortcut: one recorded access per minute per token, revisit if exact session history is needed.
+            let previous = self.items[index].last_used_at.replace(now);
+            if let Err(error) = self.save(&self.items) {
+                self.items[index].last_used_at = previous;
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     pub fn update(&mut self, method: &str, id: Option<&str>, input: Value) -> Result<()> {
@@ -139,6 +168,7 @@ impl AccessTokens {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: token_name(&input)?,
                     token: uuid::Uuid::new_v4().simple().to_string(),
+                    last_used_at: None,
                 });
             }
             ("PATCH" | "DELETE", Some(id)) => {
@@ -1235,7 +1265,11 @@ mod tests {
                 .items
                 .is_empty()
         );
-        assert!(!store.authorized(format!("Bearer {old}").as_bytes()));
+        assert!(
+            store
+                .authorized_token(format!("Bearer {old}").as_bytes())
+                .is_none()
+        );
         for invalid in [
             b"not json".as_slice(),
             br#"{"version":2,"tokens":[]}"#,
@@ -1266,7 +1300,10 @@ mod tests {
         assert!(store.update("POST", None, json!({"name":"new"})).is_err());
         assert_eq!(store.items.len(), 1);
         assert_eq!(store.items[0].name, "Codex");
-        assert!(store.authorized(format!("Bearer {}", item.token).as_bytes()));
+        assert_eq!(
+            store.authorized_token(format!("Bearer {}", item.token).as_bytes()),
+            Some(item.id.as_str())
+        );
         fs::remove_dir(&store.path).unwrap();
         fs::rename(backup, &store.path).unwrap();
         assert_eq!(

@@ -1209,9 +1209,13 @@ impl Engine {
                 .get("authorization")
                 .map(|v| v.as_bytes())
                 .unwrap_or_default();
-            if !self.mcp_tokens.lock().unwrap().authorized(supplied) {
-                return Err(Error::new(401, "Unauthorized MCP token"));
-            }
+            let token_id = self
+                .mcp_tokens
+                .lock()
+                .unwrap()
+                .authorized_token(supplied)
+                .map(str::to_owned)
+                .ok_or_else(|| Error::new(401, "Unauthorized MCP token"))?;
             let mut scope = crate::mcp::Scope::All;
             let mut scope_seen = false;
             for (key, value) in
@@ -1269,6 +1273,12 @@ impl Engine {
                     ));
                 }
             };
+            if message["jsonrpc"] == "2.0"
+                && message["method"].is_string()
+                && let Err(error) = self.mcp_tokens.lock().unwrap().record_access(&token_id)
+            {
+                eprintln!("Could not save MCP access time: {error}");
+            }
             // The legacy stdio version predates Streamable HTTP; negotiate a supported version.
             if message["method"] == "initialize"
                 && message["params"]["protocolVersion"] == "2024-11-05"
@@ -1903,7 +1913,7 @@ impl Engine {
         if uri.scheme_str() != Some("http")
             || !(authority.eq_ignore_ascii_case(crate::identity::CA_HOST)
                 || authority.eq_ignore_ascii_case(&format!("{}:80", crate::identity::CA_HOST)))
-            || uri.path_and_query().map(|value| value.as_str()) != Some("/ca")
+            || uri.path_and_query().map(|value| value.as_str()) != Some(crate::identity::CA_PATH)
         {
             return Err(Error::new(404, "Certificate download not found"));
         }
@@ -1915,24 +1925,20 @@ impl Engine {
             );
             return Ok(response);
         }
-        let pem = std::fs::read(&self.authority.ca_path)?;
-        let certificate = rustls_pemfile::certs(&mut pem.as_slice())
-            .next()
-            .transpose()?
-            .ok_or_else(|| Error::new(500, "The local CA certificate is missing"))?;
+        let certificate = crate::certificates::PublicCertificate::read(&self.authority.ca_path)?;
         Ok(Response::builder()
             .header("content-type", "application/x-x509-ca-cert")
             .header(
                 "content-disposition",
                 format!("attachment; filename=\"{}\"", crate::identity::CA_FILENAME),
             )
-            .header("content-length", certificate.as_ref().len())
+            .header("content-length", certificate.der.len())
             .header("cache-control", "no-store")
             .header("x-content-type-options", "nosniff")
             .body(full(if request.method() == hyper::Method::HEAD {
                 Bytes::new()
             } else {
-                Bytes::copy_from_slice(certificate.as_ref())
+                Bytes::from(certificate.der)
             }))
             .unwrap())
     }

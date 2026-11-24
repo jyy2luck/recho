@@ -2,6 +2,7 @@
 
 mod body;
 mod capture_spaces;
+mod certificate_ui;
 mod composer;
 mod files;
 mod library_ui;
@@ -79,7 +80,6 @@ struct Recho {
     network: network_ui::NetworkUi,
     network_open: bool,
     mcp: mcp_ui::McpUi,
-    mcp_open: bool,
     workspace_ops: Vec<Value>,
     active_workspace_op: Option<(String, Result<Value, String>, Option<RequestHandle>)>,
     spaces: capture_spaces::Spaces,
@@ -88,7 +88,7 @@ struct Recho {
     live_rows: Vec<Row>,
     har_file: Option<(files::FilePick, Option<Vec<String>>)>,
     notice: Option<String>,
-    certificates: platform::Certificates,
+    certificates: certificate_ui::CertificateUi,
     system_proxy: (bool, bool),
     proxy_preferences: platform::ProxyPreferences,
     proxy_preferences_saving: bool,
@@ -174,14 +174,13 @@ impl Recho {
             network: network_ui::NetworkUi::default(),
             network_open: false,
             mcp: mcp_ui::McpUi::default(),
-            mcp_open: false,
             workspace_ops: Vec::new(),
             active_workspace_op: None,
             composer: composer::Composer::default(),
             rules: rules_ui::RulesUi::default(),
             rules_open: false,
             library: library_ui::LibraryUi::default(),
-            certificates: platform::Certificates::default(),
+            certificates: certificate_ui::CertificateUi::default(),
             system_proxy: (false, false),
             proxy_preferences: platform::ProxyPreferences::default(),
             proxy_preferences_saving: false,
@@ -367,7 +366,6 @@ impl Recho {
     fn open_network(&mut self, section: network_ui::NetworkSection) {
         self.navigate(Navigation::Tools);
         self.rules_open = false;
-        self.mcp_open = false;
         self.network_open = true;
         self.network.open(section);
     }
@@ -728,6 +726,13 @@ impl Recho {
 impl eframe::App for Recho {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.receive();
+        self.certificates.poll(ctx, &self.ca_path);
+        if let Some(result) = self.certificates.take_background_feedback() {
+            match result {
+                Ok(message) => self.notice = Some(message),
+                Err(error) => self.error = Some(error),
+            }
+        }
         self.rules.poll();
         self.library.poll(&self.worker);
         self.network.poll();
