@@ -279,7 +279,14 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             | Action::Certificates(_)
             | Action::ExportCertificate(_) => app.ready,
             Action::Save => app.composer.active(),
-            Action::CloseTab => app.mcp.is_open() || app.composer.active(),
+            Action::CloseTab => {
+                app.mcp.is_open()
+                    || app.composer.active()
+                    || (app.navigation == Navigation::Capture
+                        && app.spaces.group != "default"
+                        && app.spaces.current().is_some()
+                        && app.spaces.settings.is_none())
+            }
             Action::ExportHar => app.ready && !app.selection.is_empty() && app.har_file.is_none(),
             Action::CopyUrl => app.selected.is_some(),
             Action::SystemProxy => app.ready && (app.running || app.system_proxy.1),
@@ -346,8 +353,10 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::CloseTab => {
             if app.mcp.is_open() {
                 app.mcp.back();
-            } else {
+            } else if app.composer.active() {
                 app.composer.close_active(&app.worker);
+            } else if app.navigation == Navigation::Capture {
+                app.close_capture_space(&app.spaces.group.clone());
             }
         }
         Action::CopyUrl => {

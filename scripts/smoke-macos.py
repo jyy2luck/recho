@@ -228,9 +228,12 @@ try:
     ui("click-text", "调试 2")
     wait_for(lambda: api("/settings")["captureGroup"] == group)
     wait_for(lambda: second in tree())
+    ui("press", "关闭 调试 2")
+    wait_for(lambda: api("/settings")["captureGroup"] == "default" and "调试 2" not in tree())
     ui("key", 118)  # F4 opens persisted history, including the previously cleared rows.
     wait_for(lambda: "第 1 页" in tree())
     assert any(row["url"] == url for row in api(f"/history?query=127.0.0.1:{origin.server_port}/plain"))
+    assert any(row["url"] == second for row in api(f"/history?query=127.0.0.1:{origin.server_port}/second-space"))
     report["native"]["independent_capture_tabs_and_history"] = True
     phase = "shutdown"
     ui("close")

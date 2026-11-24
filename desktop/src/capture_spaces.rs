@@ -51,6 +51,7 @@ pub(super) struct Spaces {
     pub load: Option<HistoryHandle>,
     pub rows: Vec<Row>,
     pub settings: Option<RequestHandle>,
+    closing_group: Option<String>,
     save_at: Option<Instant>,
     pub error: Option<String>,
     volatile_hidden: BTreeSet<String>,
@@ -95,6 +96,7 @@ impl Spaces {
             items,
             load: None,
             settings: None,
+            closing_group: None,
             rows: vec![],
             save_at: None,
             error,
@@ -173,6 +175,9 @@ impl Recho {
             return;
         }
         self.remember_capture();
+        if let Some(closed) = self.spaces.closing_group.take() {
+            self.spaces.items.remove(&closed);
+        }
         self.spaces.group = group;
         self.spaces.rows.clear();
         self.spaces.match_job = None;
@@ -296,7 +301,10 @@ impl Recho {
     }
 
     pub(super) fn activate_capture(&mut self, group: String) {
-        if self.spaces.settings.is_some() || group == self.spaces.group {
+        if self.spaces.settings.is_some()
+            || self.spaces.closing_group.is_some()
+            || group == self.spaces.group
+        {
             return;
         }
         let expected = &self.spaces.group;
@@ -313,6 +321,9 @@ impl Recho {
     }
 
     pub(super) fn new_capture_space(&mut self) {
+        if self.spaces.settings.is_some() || self.spaces.closing_group.is_some() {
+            return;
+        }
         if self.spaces.items.len() >= 32 {
             self.error = Some("最多可保留 32 个调试标签".into());
             return;
@@ -327,6 +338,24 @@ impl Recho {
             },
         );
         self.activate_capture(group);
+    }
+
+    pub(super) fn close_capture_space(&mut self, group: &str) {
+        if group == "default"
+            || group.is_empty()
+            || self.spaces.settings.is_some()
+            || self.spaces.closing_group.is_some()
+        {
+            return;
+        }
+        if group == self.spaces.group {
+            self.activate_capture("default".into());
+            if self.spaces.settings.is_some() {
+                self.spaces.closing_group = Some(group.into());
+            }
+        } else {
+            self.spaces.items.remove(group);
+        }
     }
 
     pub(super) fn clear_capture_space(&mut self) {
@@ -393,12 +422,14 @@ impl Recho {
                 Ok(result) => {
                     self.spaces.settings = None;
                     if let Err(error) = result {
+                        self.spaces.closing_group = None;
                         self.error = Some(error);
                     }
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(error) => {
                     self.spaces.settings = None;
+                    self.spaces.closing_group = None;
                     self.error = Some(error.to_string());
                 }
             }

@@ -894,8 +894,13 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
     }
     let mut next = None;
     let mut remove = None;
-    for (id, space) in &mut app.spaces.items {
-        let current = *id == app.spaces.group;
+    let mut groups: Vec<_> = app.spaces.items.keys().cloned().collect();
+    if let Some(default) = groups.iter().position(|id| id == "default") {
+        groups[..=default].rotate_right(1);
+    }
+    for id in groups {
+        let space = app.spaces.items.get_mut(&id).unwrap();
+        let current = id == app.spaces.group;
         let label = if current {
             format!("◉  {} ({})", space.name, app.rows.len())
         } else {
@@ -923,7 +928,7 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
                         .char_limit(80),
                 );
                 ui.separator();
-                if menu_item(ui, "关闭会话标签", !current && id != "default") {
+                if menu_item(ui, "关闭会话标签", id != "default") {
                     remove = Some(id.clone());
                     ui.close();
                 }
@@ -932,9 +937,22 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
         if response.clicked() {
             next = Some(id.clone());
         }
+        if id != "default" {
+            let close = ui.add(
+                egui::Button::new("×")
+                    .min_size(egui::vec2(26.0, 30.0))
+                    .frame_when_inactive(false),
+            );
+            close.ctx.accesskit_node_builder(close.id, |node| {
+                node.set_label(format!("关闭 {}", space.name))
+            });
+            if close.on_hover_text("关闭会话标签").clicked() {
+                remove = Some(id.clone());
+            }
+        }
     }
     if let Some(id) = remove {
-        app.spaces.items.remove(&id);
+        app.close_capture_space(&id);
     }
     if let Some(id) = next {
         app.navigate(Navigation::Capture);
