@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod application_icons;
 mod body;
 mod capture_filter_ui;
 mod capture_spaces;
@@ -25,6 +26,7 @@ use recho_core::native::{Detail, Phase, Row};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::Ipv4Addr,
     path::PathBuf,
 };
 use worker::{Command, DetailHandle, HistoryHandle, RequestHandle, Worker};
@@ -76,6 +78,7 @@ struct Viewer {
     detail: Detail,
     content: Content,
     structured: Option<Result<serde_json::Value, String>>,
+    response: body::response::View,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum BodyFormat {
@@ -126,6 +129,7 @@ struct Recho {
     highlight_editor: Option<(recho_core::native::ConditionSet, String)>,
     live_rows: Vec<Row>,
     har_file: Option<(files::FilePick, Option<Vec<String>>)>,
+    response_save: Option<body::response::SaveHandle>,
     notice: Option<String>,
     certificates: certificate_ui::CertificateUi,
     system_proxy: (bool, bool),
@@ -146,13 +150,14 @@ struct Recho {
     ca_path: PathBuf,
     running: bool,
     intercept_tls: bool,
+    proxy_host: Ipv4Addr,
     port: u16,
-    port_editor: String,
+    port_dialog: Option<network_ui::PortDialog>,
     rows: Vec<Row>,
     visible: Vec<usize>,
+    application_icons: application_icons::ApplicationIcons,
     sequence: BTreeMap<String, usize>,
     next_sequence: usize,
-    filter: String,
     host_filter: String,
     app_filter: String,
     protocol_filter: String,
@@ -217,6 +222,7 @@ impl Recho {
             capture_filters: Vec::new(),
             highlight_editor: None,
             har_file: None,
+            response_save: None,
             notice: None,
             network: network_ui::NetworkUi::default(),
             network_open: false,
@@ -246,13 +252,14 @@ impl Recho {
             ca_path: PathBuf::new(),
             running: false,
             intercept_tls: false,
+            proxy_host: Ipv4Addr::LOCALHOST,
             port: 0,
-            port_editor: String::new(),
+            port_dialog: None,
             rows: Vec::new(),
             visible: Vec::new(),
+            application_icons: application_icons::ApplicationIcons::default(),
             sequence: BTreeMap::new(),
             next_sequence: 1,
-            filter: String::new(),
             host_filter: String::new(),
             app_filter: String::new(),
             protocol_filter: String::new(),
@@ -291,6 +298,11 @@ impl Recho {
             self.error = Some(error);
         }
     }
+
+    fn proxy_address(&self) -> String {
+        format!("{}:{}", self.proxy_host, self.port)
+    }
+
     fn set_proxy_preferences(&mut self, preferences: platform::ProxyPreferences) {
         if self.proxy_preferences_saving {
             return;
@@ -467,6 +479,22 @@ impl Recho {
             self.har_file = None;
         }
     }
+    fn poll_response_save(&mut self) {
+        let Some(request) = &mut self.response_save else {
+            return;
+        };
+        let result = match request.try_recv() {
+            Ok(result) => result,
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+            Err(error) => Err(error.to_string()),
+        };
+        self.response_save = None;
+        match result {
+            Ok(true) => self.notice = Some("响应正文已保存".into()),
+            Ok(false) => {}
+            Err(error) => self.error = Some(format!("保存响应正文失败：{error}")),
+        }
+    }
     fn edit_capture(&mut self, id: &str) {
         let rows = if self.navigation == Navigation::History {
             &self.history_rows
@@ -583,16 +611,11 @@ impl Recho {
         }
     }
     fn refilter(&mut self) {
-        let query = self.filter.trim().to_lowercase();
         self.visible = self
             .rows
             .iter()
             .enumerate()
             .filter_map(|(index, row)| {
-                let query_match = query.is_empty()
-                    || row.url.to_lowercase().contains(&query)
-                    || row.method.to_lowercase().contains(&query)
-                    || row.status.to_string().contains(&query);
                 let protocol_match = self.protocol_filter.is_empty()
                     || match self.protocol_filter.as_str() {
                         "HTTPS" => row.url.starts_with("https:"),
@@ -615,8 +638,7 @@ impl Recho {
                     .peekable();
                 let automation_match =
                     applicable.peek().is_none() || applicable.any(|value| *value);
-                (query_match
-                    && automation_match
+                (automation_match
                     && self
                         .spaces
                         .matches
@@ -666,13 +688,13 @@ impl Recho {
                 Err(error) => self.error = Some(error),
             }
         }
+        if let Some(host) = inbox.proxy_host {
+            self.proxy_host = host;
+        }
         if let Some(snapshot) = inbox.snapshot {
             self.running = snapshot.running;
             self.intercept_tls = snapshot.intercept_tls;
-            if self.port != snapshot.port {
-                self.port = snapshot.port;
-                self.port_editor = self.port.to_string();
-            }
+            self.port = snapshot.port;
             self.history_error = snapshot.history_error;
             self.spaces.incognito = snapshot.incognito;
             self.open_capture_space(snapshot.group);
@@ -707,6 +729,7 @@ impl Recho {
                                 detail,
                                 content,
                                 structured: None,
+                                response: body::response::View::default(),
                             });
                         }
                         Err(error) => self.error = Some(error),
@@ -796,6 +819,7 @@ impl eframe::App for Recho {
         self.remember_capture();
         self.poll_curl(ctx);
         self.poll_har();
+        self.poll_response_save();
         self.composer.poll(&self.worker, self.ready, ctx);
         self.poll_workspace_operations();
         let close = ctx.input(|input| input.viewport().close_requested());

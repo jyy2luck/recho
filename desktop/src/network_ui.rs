@@ -1,8 +1,161 @@
 use crate::rules_ui::{finished, label};
-use crate::worker::{RequestHandle, Worker};
+use crate::theme::Palette;
+use crate::worker::{PortChange, PortHandle, RequestHandle, Worker};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
 use serde_json::{Value, json};
+
+pub(super) struct PortDialog {
+    port: String,
+    pending: Option<(PortChange, PortHandle)>,
+    error: Option<String>,
+}
+
+impl PortDialog {
+    pub(super) fn new(port: u16) -> Self {
+        Self {
+            port: port.to_string(),
+            pending: None,
+            error: None,
+        }
+    }
+
+    pub(super) fn show(
+        &mut self,
+        ctx: &egui::Context,
+        worker: &Worker,
+        colors: Palette,
+        current_port: u16,
+    ) -> bool {
+        if let Some((change, result)) = self
+            .pending
+            .as_mut()
+            .and_then(|(change, reply)| finished(reply).map(|result| (*change, result)))
+        {
+            self.pending = None;
+            match result {
+                Ok(_) if matches!(change, PortChange::Apply(_)) => return true,
+                Ok(port) => self.port = port.to_string(),
+                Err(error) => self.error = Some(error),
+            }
+        }
+
+        let width = (ctx.content_rect().width() - 60.0).clamp(320.0, 460.0);
+        let enabled = self.pending.is_none();
+        let mut change = None;
+        let frame = egui::Frame::window(&ctx.global_style())
+            .fill(colors.side)
+            .inner_margin(egui::Margin::same(16));
+        let modal = egui::Modal::new(egui::Id::new("proxy_port_dialog"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                ui.set_width(width);
+                ui.vertical_centered(|ui| {
+                    ui.heading("修改端口号");
+                });
+                ui.add_space(8.0);
+                egui::Frame::new()
+                    .fill(colors.bg)
+                    .stroke(egui::Stroke::new(1.0, colors.line))
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::symmetric(12, 18))
+                    .show(ui, |ui| {
+                        ui.add_enabled_ui(enabled, |ui| {
+                            ui.visuals_mut().widgets.inactive.bg_stroke =
+                                egui::Stroke::new(1.0, colors.line);
+                            ui.horizontal(|ui| {
+                                ui.add_space(((ui.available_width() - 120.0) * 0.5).max(0.0));
+                                let input = ui.add(
+                                    egui::TextEdit::singleline(&mut self.port)
+                                        .font(egui::FontId::proportional(26.0))
+                                        .horizontal_align(egui::Align::Center)
+                                        .vertical_align(egui::Align::Center)
+                                        .desired_width(120.0)
+                                        .min_size(egui::vec2(120.0, 48.0))
+                                        .hint_text("端口"),
+                                );
+                                if input.changed() {
+                                    self.error = None;
+                                }
+                                let refresh = ui.add(
+                                    egui::Button::new(crate::workbench::icon("\u{e5d5}"))
+                                        .min_size(egui::vec2(32.0, 32.0))
+                                        .frame_when_inactive(false),
+                                );
+                                refresh.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Button,
+                                        enabled,
+                                        "换一个可用端口",
+                                    )
+                                });
+                                if refresh.on_hover_text("换一个可用端口").clicked() {
+                                    change = Some(PortChange::Suggest(
+                                        self.port.trim().parse().unwrap_or(current_port),
+                                    ));
+                                }
+                            });
+                            ui.add_space(16.0);
+                            ui.columns(6, |columns| {
+                                for (ui, port) in columns
+                                    .iter_mut()
+                                    .zip(["8000", "8080", "8888", "9000", "9090", "9999"])
+                                {
+                                    ui.vertical_centered(|ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::selectable(self.port == port, port)
+                                                    .min_size(egui::vec2(43.0, 26.0)),
+                                            )
+                                            .clicked()
+                                        {
+                                            self.port = port.into();
+                                            self.error = None;
+                                        }
+                                    });
+                                }
+                            });
+                        });
+                    });
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(
+                            enabled,
+                            egui::Button::new(egui::RichText::new("完成").color(colors.accent))
+                                .min_size(egui::vec2(60.0, 30.0))
+                                .frame_when_inactive(false),
+                        )
+                        .clicked()
+                    {
+                        match self.port.trim().parse::<u16>() {
+                            Ok(port) => change = Some(PortChange::Apply(port)),
+                            Err(_) => self.error = Some("端口必须是 0–65535".into()),
+                        }
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        if let Some(error) = &self.error {
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(error).color(colors.red))
+                                    .truncate(),
+                            )
+                            .on_hover_text(error);
+                        } else if !enabled {
+                            ui.spinner();
+                        }
+                    });
+                });
+            });
+        if let Some(change) = change {
+            self.error = None;
+            match worker.edit_port(change) {
+                Ok(reply) => self.pending = Some((change, reply)),
+                Err(error) => self.error = Some(error),
+            }
+        }
+        self.pending.is_none() && modal.should_close()
+    }
+}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum NetworkSection {

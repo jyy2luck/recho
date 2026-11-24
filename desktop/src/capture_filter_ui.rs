@@ -128,6 +128,7 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
     let mut add = false;
     let can_add = conditions.items.len() < MAX_CONDITIONS;
     let width = ui.available_width().max(446.0);
+    let colors = Theme::current_palette(ui.ctx());
     egui::ScrollArea::both()
         .id_salt("condition_rows")
         .auto_shrink([false, true])
@@ -150,6 +151,8 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
                                 .sizes(Size::exact(28.0), 2)
                                 .horizontal(|mut row| {
                                     row.cell(|ui| {
+                                        ui.visuals_mut().widgets.inactive.bg_stroke =
+                                            egui::Stroke::new(1.0, colors.muted);
                                         let enabled = ui
                                             .add(egui::Checkbox::without_text(&mut item.enabled))
                                             .on_hover_text("启用条件");

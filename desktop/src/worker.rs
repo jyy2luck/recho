@@ -4,6 +4,7 @@ use recho_core::native::{
 };
 use serde_json::Value;
 use std::{
+    net::Ipv4Addr,
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
@@ -18,9 +19,16 @@ pub type RequestHandle = oneshot::Receiver<Result<Value, String>>;
 pub type DetailHandle = oneshot::Receiver<Result<Detail, String>>;
 pub type HistoryHandle = oneshot::Receiver<Result<Vec<Row>, String>>;
 pub type MatchHandle = oneshot::Receiver<Result<CaptureMatches, String>>;
+pub type PortHandle = oneshot::Receiver<Result<u16, String>>;
+
+#[derive(Clone, Copy)]
+pub enum PortChange {
+    Suggest(u16),
+    Apply(u16),
+}
 
 pub enum Command {
-    Port(u16),
+    Port(PortChange, oneshot::Sender<Result<u16, String>>),
     Configure {
         running: bool,
         intercept_tls: bool,
@@ -71,6 +79,7 @@ pub struct Inbox {
     pub error: Option<String>,
     pub breakpoints: Option<Value>,
     pub workspace_operations: Option<Value>,
+    pub proxy_host: Option<Ipv4Addr>,
     pub system_proxy: Option<(bool, bool)>,
     pub proxy_preferences: Option<crate::platform::ProxyPreferences>,
     pub imported: Option<(String, String, usize)>,
@@ -125,7 +134,9 @@ impl Worker {
                     publish(&mut |inbox| inbox.error = Some(error.clone()));
                 }
                 let mut proxy_state = (system_proxy.active(), system_proxy.pending());
+                let mut proxy_host = engine.proxy_host();
                 publish(&mut |inbox| {
+                    inbox.proxy_host = Some(proxy_host);
                     inbox.system_proxy = Some(proxy_state);
                     inbox.proxy_preferences = Some(system_proxy.preferences());
                 });
@@ -144,9 +155,19 @@ impl Worker {
                 let engine = Arc::new(engine);
                 let mut tick = tokio::time::interval(Duration::from_millis(300));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let address_period = Duration::from_secs(5);
+                let mut address_tick = tokio::time::interval_at(tokio::time::Instant::now() + address_period, address_period);
+                address_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
                         _ = tick.tick() => {},
+                        _ = address_tick.tick() => {
+                            let host = engine.proxy_host();
+                            if host != proxy_host {
+                                proxy_host = host;
+                                publish(&mut |inbox| inbox.proxy_host = Some(host));
+                            }
+                        },
                         _ = requests.join_next(), if !requests.is_empty() => {},
                         command = rx.recv() => {
                             let Some(command) = command else { break };
@@ -191,21 +212,27 @@ impl Worker {
                                     }
                                     Ok(())
                                 },
-                                Command::Port(port) => {
-                                    let enabled = system_proxy.active();
-                                    match system_proxy.restore(&engine).await {
-                                        Ok(()) => {
-                                            let result = engine.set_port(port).await;
-                                            let state = engine.snapshot(revision).await;
-                                            if enabled && state.running {
-                                                let restore = system_proxy.set(&engine, true, state.port).await;
-                                                result.and(restore)
-                                            } else {
-                                                result
+                                Command::Port(change, reply) => {
+                                    let result = match change {
+                                        PortChange::Suggest(previous) => engine.suggest_proxy_port(previous).await,
+                                        PortChange::Apply(port) => {
+                                            let enabled = system_proxy.active();
+                                            match system_proxy.restore(&engine).await {
+                                                Ok(()) => {
+                                                    let mut result = engine.set_port(port).await;
+                                                    let state = engine.snapshot(revision).await;
+                                                    if enabled && state.running {
+                                                        result = result.and(system_proxy.set(&engine, true, state.port).await);
+                                                    }
+                                                    result.map(|()| state.port)
+                                                }
+                                                Err(error) => Err(error),
                                             }
                                         }
-                                        Err(error) => Err(error),
-                                    }
+                                    };
+                                    let _ = reply.send(result);
+                                    ctx.request_repaint();
+                                    Ok(())
                                 },
                                 Command::SystemProxy(enabled) => {
                                     let state = engine.snapshot(revision).await;
@@ -351,6 +378,12 @@ impl Worker {
         Ok(receive)
     }
 
+    pub fn edit_port(&self, change: PortChange) -> Result<PortHandle, String> {
+        let (reply, receive) = oneshot::channel();
+        self.send(Command::Port(change, reply))?;
+        Ok(receive)
+    }
+
     pub fn detail(&self, id: String, phase: Phase) -> Result<DetailHandle, String> {
         let (reply, receive) = oneshot::channel();
         self.send(Command::ArchivedDetail { id, phase, reply })?;
@@ -436,6 +469,7 @@ mod tests {
                 response_bytes: 0,
                 host: "localhost".into(),
                 application: "unknown".into(),
+                application_path: None,
                 server_ip: String::new(),
                 protocol: "HTTP/1.1".into(),
                 content_type: "text/plain".into(),

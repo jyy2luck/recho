@@ -17,7 +17,6 @@ use std::{
 #[serde(default)]
 pub struct Space {
     pub name: String,
-    pub query: String,
     pub application: String,
     pub host: String,
     pub protocol: String,
@@ -145,7 +144,6 @@ impl Recho {
         let Some(space) = self.spaces.items.get_mut(&self.spaces.group) else {
             return;
         };
-        space.query.clone_from(&self.filter);
         space.application.clone_from(&self.app_filter);
         space.host.clone_from(&self.host_filter);
         space.protocol.clone_from(&self.protocol_filter);
@@ -198,7 +196,6 @@ impl Recho {
                 ..Space::default()
             })
             .clone();
-        self.filter = state.query;
         self.app_filter = state.application;
         self.host_filter = state.host;
         (self.protocol_filter, self.version_filter) = match state.protocol.as_str() {

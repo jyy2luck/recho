@@ -94,17 +94,10 @@ fn choose(choice: Choice) -> Result<Option<PathBuf>, String> {
 #[cfg(windows)]
 fn choose(choice: Choice) -> Result<Option<PathBuf>, String> {
     use std::os::windows::process::CommandExt;
-    let (kind, extension, name) = match &choice {
-        Choice::Save(name) => (
-            "SaveFileDialog",
-            Path::new(name)
-                .extension()
-                .and_then(|suffix| suffix.to_str())
-                .unwrap_or(""),
-            name.as_str(),
-        ),
-        Choice::Open(extension) => ("OpenFileDialog", *extension, ""),
-        Choice::Directory => ("FolderBrowserDialog", "", ""),
+    let (kind, extension) = match choice {
+        Choice::Save(name) => return save_dialog(&name),
+        Choice::Open(extension) => ("OpenFileDialog", extension),
+        Choice::Directory => ("FolderBrowserDialog", ""),
     };
     let (configure, result) = if kind == "FolderBrowserDialog" {
         (String::new(), "SelectedPath")
@@ -115,9 +108,7 @@ fn choose(choice: Choice) -> Result<Option<PathBuf>, String> {
             format!("{extension} (*.{extension})|*.{extension}|所有文件 (*.*)|*.*")
         };
         (
-            format!(
-                "$d.Filter = '{filter}'\n$d.DefaultExt = '{extension}'\n$d.FileName = $env:RECHO_PICK_FILENAME"
-            ),
+            format!("$d.Filter = '{filter}'\n$d.DefaultExt = '{extension}'"),
             "FileName",
         )
     };
@@ -134,11 +125,83 @@ try {{ if ($d.ShowDialog() -eq 'OK') {{ [Console]::WriteLine($d.{result}) }} }} 
     let output = Command::new("powershell.exe")
         .creation_flags(0x08000000)
         .env_remove("PSModulePath")
-        .env("RECHO_PICK_FILENAME", name)
         .args(["-NoProfile", "-STA", "-Command", &script])
         .output()
         .map_err(|error| error.to_string())?;
     chosen_path(output)
+}
+
+#[cfg(windows)]
+fn save_dialog(name: &str) -> Result<Option<PathBuf>, String> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows_sys::Win32::UI::{
+        Controls::Dialogs::{
+            CommDlgExtendedError, GetSaveFileNameW, OFN_EXPLORER, OFN_HIDEREADONLY,
+            OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+        },
+        WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+    };
+
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|suffix| suffix.to_str())
+        .unwrap_or("");
+    let all_files = "所有文件 (*.*)\0*.*\0\0";
+    let filter = if extension.is_empty() {
+        all_files.to_owned()
+    } else {
+        format!("{extension} (*.{extension})\0*.{extension}\0{all_files}")
+    };
+    let filter = filter.encode_utf16().collect::<Vec<_>>();
+    let default_extension = extension
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let title = "保存文件\0".encode_utf16().collect::<Vec<_>>();
+    let mut path = vec![0u16; 32_768];
+    for (slot, code_unit) in path.iter_mut().take(32_767).zip(name.encode_utf16()) {
+        *slot = code_unit;
+    }
+
+    // Keep the dialog attached to the app when its window is in the foreground.
+    let foreground = unsafe { GetForegroundWindow() };
+    let mut process_id = 0;
+    let owner = if !foreground.is_null()
+        && unsafe { GetWindowThreadProcessId(foreground, &mut process_id) } != 0
+        && process_id == std::process::id()
+    {
+        foreground
+    } else {
+        std::ptr::null_mut()
+    };
+    let mut options = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        hwndOwner: owner,
+        lpstrFilter: filter.as_ptr(),
+        nFilterIndex: 1,
+        lpstrFile: path.as_mut_ptr(),
+        nMaxFile: path.len() as u32,
+        lpstrTitle: title.as_ptr(),
+        lpstrDefExt: default_extension.as_ptr(),
+        Flags: OFN_EXPLORER
+            | OFN_HIDEREADONLY
+            | OFN_NOCHANGEDIR
+            | OFN_OVERWRITEPROMPT
+            | OFN_PATHMUSTEXIST,
+        ..Default::default()
+    };
+    // The string buffers remain valid and the output buffer stays writable until the call returns.
+    if unsafe { GetSaveFileNameW(&mut options) } != 0 {
+        let end = path
+            .iter()
+            .position(|&code_unit| code_unit == 0)
+            .unwrap_or(path.len());
+        return Ok(Some(OsString::from_wide(&path[..end]).into()));
+    }
+    match unsafe { CommDlgExtendedError() } {
+        0 => Ok(None),
+        error => Err(format!("无法打开保存对话框（0x{error:04X}）")),
+    }
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]

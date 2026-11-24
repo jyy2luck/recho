@@ -45,6 +45,7 @@ pub struct Row {
     pub response_bytes: usize,
     pub host: String,
     pub application: String,
+    pub application_path: Option<String>,
     pub server_ip: String,
     pub protocol: String,
     pub content_type: String,
@@ -74,6 +75,7 @@ impl From<&crate::storage::Session> for Row {
                 .as_ref()
                 .map(|app| app.name.clone())
                 .unwrap_or_else(|| "未知来源".into()),
+            application_path: session.application.as_ref().map(|app| app.path.clone()),
             server_ip: session.server_ip.clone().unwrap_or_default(),
             protocol: session.protocol.clone(),
             content_type: session
@@ -152,6 +154,10 @@ impl DesktopEngine {
 
     pub fn ca_path(&self) -> PathBuf {
         self.running.engine.authority.ca_path.clone()
+    }
+
+    pub fn proxy_host(&self) -> std::net::Ipv4Addr {
+        self.running.engine.proxy_addresses().0
     }
 
     /// Trusted desktop calls reuse the same validation and handlers as the authenticated HTTP API.
@@ -273,6 +279,21 @@ impl DesktopEngine {
             .map_err(|e| e.to_string())
     }
 
+    pub async fn suggest_proxy_port(&self, previous: u16) -> std::result::Result<u16, String> {
+        let host = self.running.engine.config.proxy_host;
+        let suggestion: Result<u16> = async {
+            let candidate = Engine::bind_proxy(0, host).await?;
+            let port = candidate.local_addr()?.port();
+            if port == previous {
+                // Keep the previous suggestion reserved until the OS picks a different port.
+                return Ok(Engine::bind_proxy(0, host).await?.local_addr()?.port());
+            }
+            Ok(port)
+        }
+        .await;
+        suggestion.map_err(|error| error.to_string())
+    }
+
     pub fn detail(&self, id: &str, phase: Phase) -> std::result::Result<Detail, String> {
         let result = || -> Result<Detail> {
             let history = self.running.engine.history.lock().unwrap();
@@ -388,6 +409,13 @@ mod tests {
                 .is_err()
         );
         assert_eq!(engine.snapshot(None).await.port, initial.port);
+        let suggested = engine.suggest_proxy_port(initial.port).await.unwrap();
+        assert_ne!(initial.port, suggested);
+        assert_eq!(engine.snapshot(None).await.port, initial.port);
+        engine.set_port(suggested).await.unwrap();
+        assert_eq!(engine.snapshot(None).await.port, suggested);
+        let settings = crate::settings::SettingsStore::open(directory.path());
+        assert_eq!(settings.snapshot().proxy_port, Some(suggested));
         engine.clear().unwrap();
         assert!(
             engine

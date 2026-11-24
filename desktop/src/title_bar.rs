@@ -58,7 +58,7 @@ impl TitleBar {
     }
 
     pub(super) fn menu_ui(ui: &mut Ui, row: Rect) -> Ui {
-        let height = ui.spacing().interact_size.y.max(22.0);
+        let height = super::workbench::MENU_HEIGHT;
         let bounds = Rect::from_min_max(
             egui::pos2(row.left() + 12.0, row.center().y - height / 2.0),
             egui::pos2(

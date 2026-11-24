@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+pub mod response;
+
 const PAGE_ROWS: usize = 128;
 const ROW_BYTES: usize = 512;
 
@@ -163,12 +165,13 @@ pub fn show_structured(ui: &mut eframe::egui::Ui, value: &serde_json::Value, tre
     let content = match cached {
         Some((previous, content)) if previous == digest => content,
         _ => {
-            let mut buffer = CappedJson(Vec::new());
-            if serde_json::to_writer_pretty(&mut buffer, value).is_err() {
-                ui.weak("格式化视图超过 1 MiB，请切换到树或原始正文。");
-                return;
-            }
-            let content = Arc::new(Content::new(buffer.0));
+            let content = match formatted_json(value) {
+                Ok(content) => Arc::new(content),
+                Err(error) => {
+                    ui.weak(error);
+                    return;
+                }
+            };
             ui.data_mut(|data| data.insert_temp(slot, (digest, content.clone())));
             content
         }
@@ -185,6 +188,13 @@ pub fn show_structured(ui: &mut eframe::egui::Ui, value: &serde_json::Value, tre
                 }
             });
     }
+}
+
+fn formatted_json(value: &serde_json::Value) -> Result<Content, String> {
+    let mut buffer = CappedJson(Vec::new());
+    serde_json::to_writer_pretty(&mut buffer, value)
+        .map_err(|_| "格式化视图超过 1 MiB，请切换到树或原始正文。".to_owned())?;
+    Ok(Content::new(buffer.0))
 }
 
 struct CappedJson(Vec<u8>);

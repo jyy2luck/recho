@@ -5,6 +5,9 @@ use egui_extras::{Column, TableBuilder};
 const NEW_HTTP: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::T);
 
+#[cfg(not(target_os = "macos"))]
+pub(super) const MENU_HEIGHT: f32 = 30.0;
+
 pub(super) fn icon(code: &str) -> RichText {
     RichText::new(code).font(egui::FontId::new(
         19.0,
@@ -67,6 +70,109 @@ fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
         .clicked()
 }
 
+#[cfg(not(target_os = "macos"))]
+fn show_menu_titles<const N: usize>(
+    ui: &mut egui::Ui,
+    titles: [&str; N],
+    mut show_contents: impl FnMut(usize, &mut egui::Ui),
+) -> f32 {
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let ids: [egui::Id; N] = std::array::from_fn(|index| ui.make_persistent_id(("menu", index)));
+    let active = ids
+        .iter()
+        .position(|&id| egui::Popup::is_id_open(ui.ctx(), id));
+    let buttons: [egui::Response; N] = std::array::from_fn(|index| {
+        ui.add(
+            egui::Button::new(titles[index])
+                .min_size(egui::vec2(46.0, MENU_HEIGHT))
+                .selected(active == Some(index))
+                .frame_when_inactive(false)
+                .stroke(egui::Stroke::NONE),
+        )
+    });
+    let next = match buttons.iter().position(egui::Response::clicked) {
+        Some(index) => (active != Some(index)).then_some(index),
+        None => active.map(|index| {
+            buttons
+                .iter()
+                .position(egui::Response::contains_pointer)
+                .unwrap_or(index)
+        }),
+    };
+    if next != active {
+        if let Some(index) = active {
+            egui::Popup::close_id(ui.ctx(), ids[index]);
+        }
+        if let Some(index) = next {
+            egui::Popup::open_id(ui.ctx(), ids[index]);
+        }
+    }
+    if let Some(index) = next {
+        egui::Popup::menu(&buttons[index])
+            .id(ids[index])
+            .open_memory(None)
+            .show(|ui| show_contents(index, ui));
+    }
+    ui.cursor().min.x
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+#[test]
+fn top_menus_switch_on_hover_after_a_click() {
+    let ctx = egui::Context::default();
+    let frame = |events| {
+        let mut shown = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 200.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                shown = None;
+                ui.horizontal(|ui| {
+                    show_menu_titles(ui, ["A", "B", "C"], |index, ui| {
+                        shown = Some(index);
+                        ui.label("Menu content");
+                    });
+                });
+            },
+        );
+        output.textures_delta.clear();
+        shown
+    };
+    let middle = egui::pos2(69.0, 15.0);
+    let click = |pressed| egui::Event::PointerButton {
+        pos: middle,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    assert_eq!(frame(vec![]), None);
+    assert_eq!(frame(vec![egui::Event::PointerMoved(middle)]), None);
+    assert_eq!(frame(vec![click(true)]), None);
+    assert_eq!(frame(vec![click(false)]), Some(1));
+    assert_eq!(
+        frame(vec![egui::Event::PointerMoved(egui::pos2(45.0, 15.0))]),
+        Some(0)
+    );
+    assert_eq!(
+        frame(vec![egui::Event::PointerMoved(egui::pos2(93.0, 15.0))]),
+        Some(2)
+    );
+    frame(vec![egui::Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    assert_eq!(frame(vec![]), None);
+}
+
 pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     if ui
         .ctx()
@@ -121,193 +227,205 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             let row = ui.available_rect_before_wrap();
             #[cfg(windows)]
             let mut menu_ui = crate::title_bar::TitleBar::menu_ui(ui, row);
-            let draw_menus = |ui: &mut egui::Ui| {
-                #[cfg(windows)]
-                app.title_bar.icon(ui);
-                #[cfg(not(windows))]
-                ui.label(RichText::new("recho").strong().color(colors.accent));
-                ui.menu_button("文件", |ui| {
-                    if ui
-                        .add_enabled(app.ready, egui::Button::new("新建 API 请求"))
-                        .clicked()
-                    {
-                        app.composer.open_new();
-                        if app.navigation == Navigation::History {
-                            app.navigate(Navigation::Capture);
-                        }
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(app.ready, egui::Button::new("新建原始请求"))
-                        .clicked()
-                    {
-                        app.composer.open_raw();
-                        if app.navigation == Navigation::History {
-                            app.navigate(Navigation::Capture);
-                        }
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(app.ready, egui::Button::new("导入 HAR"))
-                        .clicked()
-                    {
-                        app.choose_har(ui.ctx(), false);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(!app.selection.is_empty(), egui::Button::new("导出所选 HAR"))
-                        .clicked()
-                    {
-                        app.choose_har(ui.ctx(), true);
-                        ui.close();
-                    }
-                    if ui.button("退出").clicked() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("编辑", |ui| {
-                    if ui.button("复制所选 URL").clicked() {
-                        copy_url(app, ui);
-                        ui.close();
-                    }
-                });
-                ui.menu_button("视图", |ui| {
-                    ui.checkbox(&mut app.sidebar_visible, "显示侧边栏");
-                    if ui.checkbox(&mut app.details_open, "显示详情").changed() && app.details_open
-                    {
-                        app.load_details();
-                    }
-                    ui.menu_button("主题", |ui| {
-                        for (color, label) in theme::ThemeColor::OPTIONS {
-                            if ui
-                                .selectable_label(app.theme.color == color, label)
-                                .clicked()
-                            {
-                                app.set_theme(theme::Theme { color, ..app.theme }, ui.ctx());
-                                ui.close();
-                            }
-                        }
-                    });
-                    ui.menu_button("外观", |ui| {
-                        for (appearance, label) in theme::Appearance::OPTIONS {
-                            if ui
-                                .selectable_label(app.theme.appearance == appearance, label)
-                                .clicked()
-                            {
-                                app.set_theme(
-                                    theme::Theme {
-                                        appearance,
-                                        ..app.theme
-                                    },
-                                    ui.ctx(),
-                                );
-                                ui.close();
-                            }
-                        }
-                    });
-                });
-                ui.menu_button("工具", |ui| {
-                    if ui.button("MCP").clicked() {
-                        app.mcp.open();
-                        ui.close();
-                    }
-                    if ui.button("访问令牌").clicked() {
-                        app.mcp.open_tokens();
-                        ui.close();
-                    }
-                });
-                ui.menu_button("调试", |ui| {
-                    if ui
-                        .button(if app.running {
-                            "停止调试  ⌘/Ctrl+G"
-                        } else {
-                            "开始调试  ⌘/Ctrl+G"
-                        })
-                        .clicked()
-                    {
-                        app.toggle_capture();
-                        ui.close();
-                    }
-                    let mut incognito = app.spaces.incognito;
-                    if ui
-                        .add_enabled(
-                            app.ready && app.spaces.settings.is_none(),
-                            egui::Checkbox::new(&mut incognito, "无痕模式"),
-                        )
-                        .changed()
-                    {
-                        app.set_incognito(incognito);
-                    }
-                    if ui.button("清空捕获").clicked() {
-                        app.clear_confirmation = true;
-                        ui.close();
-                    }
-                });
-                ui.menu_button("代理", |ui| {
-                    if ui.button("连接设置").clicked() {
-                        app.connection_open = true;
-                        ui.close();
-                    }
-                    let mut enabled = app.system_proxy.0;
-                    if ui
-                        .add_enabled(app.ready, egui::Checkbox::new(&mut enabled, "系统代理"))
-                        .changed()
-                    {
-                        app.send(Command::SystemProxy(enabled));
-                    }
-                    if app.system_proxy.1
-                        && !app.system_proxy.0
-                        && ui.button("恢复系统代理").clicked()
-                    {
-                        app.send(Command::SystemProxy(false));
-                    }
-                    ui.separator();
-                    proxy_preferences(app, ui);
-                });
-                ui.menu_button("证书", |ui| {
-                    let mut intercept = app.intercept_tls;
-                    if ui.checkbox(&mut intercept, "HTTPS 解密").changed() {
-                        app.send(Command::Configure {
-                            running: app.running,
-                            intercept_tls: intercept,
-                        });
-                    }
-                    ui.separator();
-                    for (page, label) in CertificatePage::MENU {
+            let mut draw_menus = |ui: &mut egui::Ui| {
+                type MenuAction = fn(&mut Recho, &mut egui::Ui);
+                let menus: [(&str, MenuAction); 8] = [
+                    ("文件", |app, ui| {
                         if ui
-                            .add_enabled(app.ready, egui::Button::new(label))
+                            .add_enabled(app.ready, egui::Button::new("新建 API 请求"))
                             .clicked()
                         {
-                            app.certificates.open(page);
+                            app.composer.open_new();
+                            if app.navigation == Navigation::History {
+                                app.navigate(Navigation::Capture);
+                            }
                             ui.close();
                         }
-                    }
-                    ui.menu_button("导出 CA 证书", |ui| {
-                        for (format, label) in CertificatePage::EXPORTS {
+                        if ui
+                            .add_enabled(app.ready, egui::Button::new("新建原始请求"))
+                            .clicked()
+                        {
+                            app.composer.open_raw();
+                            if app.navigation == Navigation::History {
+                                app.navigate(Navigation::Capture);
+                            }
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(app.ready, egui::Button::new("导入 HAR"))
+                            .clicked()
+                        {
+                            app.choose_har(ui.ctx(), false);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                !app.selection.is_empty(),
+                                egui::Button::new("导出所选 HAR"),
+                            )
+                            .clicked()
+                        {
+                            app.choose_har(ui.ctx(), true);
+                            ui.close();
+                        }
+                        if ui.button("退出").clicked() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                    }),
+                    ("编辑", |app, ui| {
+                        if ui.button("复制所选 URL").clicked() {
+                            copy_url(app, ui);
+                            ui.close();
+                        }
+                    }),
+                    ("视图", |app, ui| {
+                        ui.checkbox(&mut app.sidebar_visible, "显示侧边栏");
+                        if ui.checkbox(&mut app.details_open, "显示详情").changed()
+                            && app.details_open
+                        {
+                            app.load_details();
+                        }
+                        ui.menu_button("主题", |ui| {
+                            for (color, label) in theme::ThemeColor::OPTIONS {
+                                if ui
+                                    .selectable_label(app.theme.color == color, label)
+                                    .clicked()
+                                {
+                                    app.set_theme(theme::Theme { color, ..app.theme }, ui.ctx());
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.menu_button("外观", |ui| {
+                            for (appearance, label) in theme::Appearance::OPTIONS {
+                                if ui
+                                    .selectable_label(app.theme.appearance == appearance, label)
+                                    .clicked()
+                                {
+                                    app.set_theme(
+                                        theme::Theme {
+                                            appearance,
+                                            ..app.theme
+                                        },
+                                        ui.ctx(),
+                                    );
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }),
+                    ("工具", |app, ui| {
+                        if ui.button("MCP").clicked() {
+                            app.mcp.open();
+                            ui.close();
+                        }
+                        if ui.button("访问令牌").clicked() {
+                            app.mcp.open_tokens();
+                            ui.close();
+                        }
+                    }),
+                    ("调试", |app, ui| {
+                        if ui
+                            .button(if app.running {
+                                "停止调试  ⌘/Ctrl+G"
+                            } else {
+                                "开始调试  ⌘/Ctrl+G"
+                            })
+                            .clicked()
+                        {
+                            app.toggle_capture();
+                            ui.close();
+                        }
+                        let mut incognito = app.spaces.incognito;
+                        if ui
+                            .add_enabled(
+                                app.ready && app.spaces.settings.is_none(),
+                                egui::Checkbox::new(&mut incognito, "无痕模式"),
+                            )
+                            .changed()
+                        {
+                            app.set_incognito(incognito);
+                        }
+                        if ui.button("清空捕获").clicked() {
+                            app.clear_confirmation = true;
+                            ui.close();
+                        }
+                    }),
+                    ("代理", |app, ui| {
+                        if ui.button("连接设置").clicked() {
+                            app.connection_open = true;
+                            ui.close();
+                        }
+                        let mut enabled = app.system_proxy.0;
+                        if ui
+                            .add_enabled(app.ready, egui::Checkbox::new(&mut enabled, "系统代理"))
+                            .changed()
+                        {
+                            app.send(Command::SystemProxy(enabled));
+                        }
+                        if app.system_proxy.1
+                            && !app.system_proxy.0
+                            && ui.button("恢复系统代理").clicked()
+                        {
+                            app.send(Command::SystemProxy(false));
+                        }
+                        ui.separator();
+                        proxy_preferences(app, ui);
+                    }),
+                    ("证书", |app, ui| {
+                        let mut intercept = app.intercept_tls;
+                        if ui.checkbox(&mut intercept, "HTTPS 解密").changed() {
+                            app.send(Command::Configure {
+                                running: app.running,
+                                intercept_tls: intercept,
+                            });
+                        }
+                        ui.separator();
+                        for (page, label) in CertificatePage::MENU {
                             if ui
                                 .add_enabled(app.ready, egui::Button::new(label))
                                 .clicked()
                             {
-                                app.certificates.export(ui.ctx(), format);
+                                app.certificates.open(page);
                                 ui.close();
                             }
                         }
-                    });
-                });
-                ui.menu_button("帮助", |ui| {
-                    ui.label("recho 0.1.0 · Rust 桌面验证版");
-                    ui.label("核心抓包流程已接入；灰色入口尚未迁移。");
-                });
-                #[cfg(windows)]
-                return ui.cursor().min.x;
+                        ui.menu_button("导出 CA 证书", |ui| {
+                            for (format, label) in CertificatePage::EXPORTS {
+                                if ui
+                                    .add_enabled(app.ready, egui::Button::new(label))
+                                    .clicked()
+                                {
+                                    app.certificates.export(ui.ctx(), format);
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }),
+                    ("帮助", |_, ui| {
+                        ui.label("recho 0.1.0 · Rust 桌面验证版");
+                        ui.label("核心抓包流程已接入；灰色入口尚未迁移。");
+                    }),
+                ];
+                ui.horizontal_centered(|ui| {
+                    #[cfg(windows)]
+                    app.title_bar.icon(ui);
+                    #[cfg(not(windows))]
+                    ui.label(RichText::new("recho").strong().color(colors.accent));
+                    ui.add_space(2.0);
+                    show_menu_titles(ui, menus.map(|(label, _)| label), |index, ui| {
+                        (menus[index].1)(app, ui);
+                    })
+                })
+                .inner
             };
             #[cfg(windows)]
             {
-                let menu = egui::MenuBar::new().ui(&mut menu_ui, draw_menus);
-                app.title_bar.show(ui, row, menu.inner);
+                let menu_end = draw_menus(&mut menu_ui);
+                app.title_bar.show(ui, row, menu_end);
             }
             #[cfg(not(windows))]
-            egui::MenuBar::new().ui(ui, draw_menus);
+            draw_menus(ui);
         });
     egui::Panel::bottom("status")
         .frame(
@@ -510,33 +628,6 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             }
             filters(app, ui);
             crate::capture_filter_ui::show(app, ui);
-            ui.horizontal(|ui| {
-                if !app.capture_filters.is_empty() {
-                    ui.weak(format!("MCP 筛选 ({})", app.capture_filters.len()));
-                }
-                ui.label(icon("\u{e8b6}"));
-                if ui
-                    .add(
-                        egui::TextEdit::singleline(&mut app.filter)
-                            .hint_text("搜索 URL、方法、状态")
-                            .desired_width((ui.available_width() - 46.0).max(80.0)),
-                    )
-                    .changed()
-                {
-                    app.refilter();
-                }
-                if ui
-                    .add(egui::Button::selectable(app.details_open, icon("\u{e949}")))
-                    .on_hover_text("显示或关闭详情；双击记录打开")
-                    .clicked()
-                {
-                    app.details_open = !app.details_open;
-                    if app.details_open {
-                        app.load_details();
-                    }
-                }
-            });
-            ui.separator();
             if app.details_open && app.selected.is_some() {
                 let size = (ui.available_width() * 0.50).max(360.0);
                 egui::Panel::right("details")
@@ -693,8 +784,9 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
         .inner_margin(egui::Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let text = if app.ready {
-                    format!("●  Proxying on 127.0.0.1:{}", app.port)
+                let address_ready = app.ready && app.port != 0;
+                let text = if address_ready {
+                    format!("●  Proxying on {}", app.proxy_address())
                 } else {
                     "正在启动引擎…".into()
                 };
@@ -711,20 +803,26 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                     .show(ui, |ui| {
                         ui.set_width((address_width - address.total_margin().sum().x).max(120.0));
                         ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(RichText::new(text).color(if app.running {
-                                        colors.green
-                                    } else {
-                                        colors.muted
-                                    }))
-                                    .frame(false)
-                                    .min_size(egui::vec2(0.0, 28.0)),
+                            ui.label(RichText::new(text).color(if app.running {
+                                colors.green
+                            } else {
+                                colors.muted
+                            }));
+                            let edit = ui.add_enabled(
+                                address_ready,
+                                egui::Button::new(icon("\u{e3c9}"))
+                                    .min_size(egui::vec2(28.0, 28.0))
+                                    .frame_when_inactive(false),
+                            );
+                            edit.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    address_ready,
+                                    "修改端口号",
                                 )
-                                .on_hover_text("修改监听端口")
-                                .clicked()
-                            {
-                                app.connection_open = true;
+                            });
+                            if edit.on_hover_text("修改端口号").clicked() {
+                                app.port_dialog = Some(network_ui::PortDialog::new(app.port));
                             }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -749,11 +847,10 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                     {
                                         app.send(Command::SystemProxy(!active && !pending));
                                     }
-                                    if icon_button(ui, "\u{e14d}", "复制代理地址", true)
-                                        .on_hover_text("复制代理地址")
+                                    if icon_button(ui, "\u{e14d}", "复制代理地址", address_ready)
                                         .clicked()
                                     {
-                                        ui.ctx().copy_text(format!("127.0.0.1:{}", app.port));
+                                        ui.ctx().copy_text(app.proxy_address());
                                     }
                                 },
                             );
@@ -793,84 +890,102 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
 
 fn filters(app: &mut Recho, ui: &mut egui::Ui) {
     let mut changed = false;
-    egui::ScrollArea::horizontal()
-        .id_salt("quick_filters")
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(
-                        app.protocol_filter.is_empty()
-                            && app.version_filter.is_empty()
-                            && app.type_filter.is_empty()
-                            && app.status_filter == 0,
-                        "All",
-                    )
-                    .clicked()
-                {
-                    app.protocol_filter.clear();
-                    app.version_filter.clear();
-                    app.type_filter.clear();
-                    app.status_filter = 0;
-                    changed = true;
-                }
-                ui.separator();
-                for (filter, choices) in [
-                    (
-                        &mut app.protocol_filter,
-                        &["HTTP", "HTTPS", "WebSocket", "SSE"][..],
-                    ),
-                    (&mut app.version_filter, &["HTTP1", "HTTP2", "HTTP3"][..]),
-                ] {
-                    for &choice in choices {
-                        if ui.selectable_label(*filter == choice, choice).clicked() {
-                            *filter = if *filter == choice {
+    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let layout = egui::Layout::right_to_left(egui::Align::Center);
+    ui.allocate_ui_with_layout(size, layout, |ui| {
+        if ui
+            .add(egui::Button::selectable(app.details_open, icon("\u{e949}")))
+            .on_hover_text("显示或关闭详情；双击记录打开")
+            .clicked()
+        {
+            app.details_open = !app.details_open;
+            if app.details_open {
+                app.load_details();
+            }
+        }
+        if !app.capture_filters.is_empty() {
+            ui.weak(format!("MCP 筛选 ({})", app.capture_filters.len()));
+        }
+        egui::ScrollArea::horizontal()
+            .id_salt("quick_filters")
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if ui
+                        .selectable_label(
+                            app.protocol_filter.is_empty()
+                                && app.version_filter.is_empty()
+                                && app.type_filter.is_empty()
+                                && app.status_filter == 0,
+                            "All",
+                        )
+                        .clicked()
+                    {
+                        app.protocol_filter.clear();
+                        app.version_filter.clear();
+                        app.type_filter.clear();
+                        app.status_filter = 0;
+                        changed = true;
+                    }
+                    ui.separator();
+                    for (filter, choices) in [
+                        (
+                            &mut app.protocol_filter,
+                            &["HTTP", "HTTPS", "WebSocket", "SSE"][..],
+                        ),
+                        (&mut app.version_filter, &["HTTP1", "HTTP2", "HTTP3"][..]),
+                    ] {
+                        for &choice in choices {
+                            if ui.selectable_label(*filter == choice, choice).clicked() {
+                                *filter = if *filter == choice {
+                                    String::new()
+                                } else {
+                                    choice.into()
+                                };
+                                changed = true;
+                            }
+                        }
+                        ui.separator();
+                    }
+                    for (label, content_type) in [
+                        ("JSON", "json"),
+                        ("XML", "xml"),
+                        ("文本", "text/plain"),
+                        ("HTML", "html"),
+                        ("JS", "javascript"),
+                        ("图片", "image/"),
+                        ("媒体", "video/"),
+                        ("二进制", "binary"),
+                    ] {
+                        if ui
+                            .selectable_label(app.type_filter == content_type, label)
+                            .clicked()
+                        {
+                            app.type_filter = if app.type_filter == content_type {
                                 String::new()
                             } else {
-                                choice.into()
+                                content_type.into()
                             };
                             changed = true;
                         }
                     }
                     ui.separator();
-                }
-                for (label, content_type) in [
-                    ("JSON", "json"),
-                    ("XML", "xml"),
-                    ("文本", "text/plain"),
-                    ("HTML", "html"),
-                    ("JS", "javascript"),
-                    ("图片", "image/"),
-                    ("媒体", "video/"),
-                    ("二进制", "binary"),
-                ] {
-                    if ui
-                        .selectable_label(app.type_filter == content_type, label)
-                        .clicked()
-                    {
-                        app.type_filter = if app.type_filter == content_type {
-                            String::new()
-                        } else {
-                            content_type.into()
-                        };
-                        changed = true;
+                    for status in 1..=5 {
+                        if ui
+                            .selectable_label(app.status_filter == status, format!("{status}xx"))
+                            .clicked()
+                        {
+                            app.status_filter = if app.status_filter == status {
+                                0
+                            } else {
+                                status
+                            };
+                            changed = true;
+                        }
                     }
-                }
-                ui.separator();
-                for status in 1..=5 {
-                    if ui
-                        .selectable_label(app.status_filter == status, format!("{status}xx"))
-                        .clicked()
-                    {
-                        app.status_filter = if app.status_filter == status {
-                            0
-                        } else {
-                            status
-                        };
-                        changed = true;
-                    }
-                }
+                });
             });
-        });
+    });
     if changed {
         app.refilter();
     }
@@ -1051,7 +1166,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                 - input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as isize
         });
         if movement != 0 {
-            let ids = visible_rows(app, history);
+            let ids = visible_rows(&app.rows, &app.visible, &app.history_rows, history);
             let current = app
                 .selected
                 .as_ref()
@@ -1086,7 +1201,8 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     let mut keep = None;
     let mut rule = None;
     let modifiers = ui.input(|input| input.modifiers);
-    let rows = visible_rows(app, history);
+    let rows = visible_rows(&app.rows, &app.visible, &app.history_rows, history);
+    let application_icons = &mut app.application_icons;
     egui::ScrollArea::horizontal()
         .id_salt(("table_horizontal", history))
         .auto_shrink([false, false])
@@ -1139,24 +1255,32 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                     {
                         row.col(|ui| {
                             capture_cell(ui, index, |ui| {
+                                let title = RichText::new(*title).size(12.0);
+                                if history {
+                                    ui.add(egui::Label::new(title).truncate());
+                                    return;
+                                }
+                                let active = app.sort_column == index;
+                                let mut label = egui::Atoms::new(title);
+                                if active {
+                                    let chevron = if app.ascending {
+                                        "\u{e5ce}"
+                                    } else {
+                                        "\u{e5cf}"
+                                    };
+                                    label.push_right(icon(chevron).size(12.0).color(colors.muted));
+                                }
+                                ui.spacing_mut().item_spacing.x = 1.0;
+                                ui.spacing_mut().button_padding.x = 3.0;
                                 if ui
-                                    .selectable_label(
-                                        !history && app.sort_column == index,
-                                        RichText::new(format!(
-                                            "{title}{}",
-                                            if !history && app.sort_column == index {
-                                                if app.ascending { " ↑" } else { " ↓" }
-                                            } else {
-                                                ""
-                                            }
-                                        ))
-                                        .size(12.0),
+                                    .add(
+                                        egui::Button::new(label)
+                                            .frame_when_inactive(false)
+                                            .truncate(),
                                     )
                                     .clicked()
                                 {
-                                    if !history {
-                                        sort = Some(index);
-                                    }
+                                    sort = Some(index);
                                 }
                             })
                         });
@@ -1217,6 +1341,25 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                                         });
                                     if highlight == Some("划线") {
                                         text = text.strikethrough();
+                                    }
+                                    if index == 4 {
+                                        ui.spacing_mut().item_spacing.x = 5.0;
+                                        let size = egui::Vec2::splat(14.0);
+                                        if let Some(texture) = application_icons
+                                            .get(ui.ctx(), row.application_path.as_deref())
+                                        {
+                                            ui.image((texture.id(), size));
+                                        } else {
+                                            ui.add_sized(
+                                                size,
+                                                egui::Label::new(
+                                                    icon("\u{e069}")
+                                                        .size(size.y)
+                                                        .color(colors.muted),
+                                                )
+                                                .selectable(false),
+                                            );
+                                        }
                                     }
                                     ui.add(egui::Label::new(text).truncate().selectable(false));
                                 })
@@ -1356,11 +1499,16 @@ fn capture_cell(ui: &mut egui::Ui, column: usize, contents: impl FnOnce(&mut egu
         });
 }
 
-fn visible_rows(app: &Recho, history: bool) -> Vec<&Row> {
+fn visible_rows<'a>(
+    rows: &'a [Row],
+    visible: &[usize],
+    archived: &'a [Row],
+    history: bool,
+) -> Vec<&'a Row> {
     if history {
-        app.history_rows.iter().collect()
+        archived.iter().collect()
     } else {
-        app.visible.iter().map(|&index| &app.rows[index]).collect()
+        visible.iter().map(|&index| &rows[index]).collect()
     }
 }
 
@@ -1447,21 +1595,57 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
             MessageTab::Body,
             if request { "请求体" } else { "响应体" },
         );
+        if !request {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let more =
+                    body::response::action(ui, "\u{e5d3}", "更多响应操作", panel.viewer.is_some());
+                if let Some(viewer) = &panel.viewer {
+                    action_menu(egui::Popup::menu(&more), |ui| {
+                        if menu_item(ui, "复制响应头", !viewer.detail.headers.is_empty()) {
+                            ui.ctx().copy_text(viewer.detail.headers.clone());
+                            ui.close();
+                        }
+                        let text = match &viewer.content {
+                            Content::Text { text, .. } if viewer.detail.notice.is_none() => {
+                                Some(text)
+                            }
+                            _ => None,
+                        };
+                        if menu_item(ui, "复制响应头和正文", text.is_some()) {
+                            if let Some(text) = text {
+                                ui.ctx().copy_text(format!(
+                                    "{}\r\n\r\n{text}",
+                                    viewer.detail.headers.trim_end_matches(['\r', '\n']),
+                                ));
+                            }
+                            ui.close();
+                        }
+                    });
+                }
+                if row.status > 0 {
+                    let color = if row.error.is_some() || row.status >= 400 {
+                        colors.red
+                    } else {
+                        colors.green
+                    };
+                    response_badge(ui, row.status.to_string(), color, colors.bg, "HTTP 状态码");
+                }
+                if !row.protocol.is_empty() {
+                    let protocol = match row.protocol.as_str() {
+                        "HTTP/2" | "HTTP/2.0" => "h2",
+                        "HTTP/3" | "HTTP/3.0" => "h3",
+                        protocol => protocol,
+                    };
+                    response_badge(ui, protocol, colors.green, colors.bg, &row.protocol);
+                }
+            });
+        }
     });
     ui.separator();
     if request {
         ui.add(egui::Label::new(&row.url).truncate());
     } else {
         ui.horizontal(|ui| {
-            ui.colored_label(
-                if row.error.is_some() || row.status >= 400 {
-                    colors.red
-                } else {
-                    colors.green
-                },
-                row.status.to_string(),
-            );
-            ui.separator();
             ui.weak(format!("{} ms", row.duration_ms));
             ui.separator();
             ui.weak(format!("{} bytes", row.response_bytes));
@@ -1512,6 +1696,20 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
                         }
                     });
             });
+        return;
+    }
+    if !request {
+        ui.push_id((&viewer.detail.id, "response"), |ui| {
+            viewer.response.show(
+                ui,
+                &mut panel.format,
+                &viewer.content,
+                viewer.detail.notice.as_deref(),
+                (panel.tab == MessageTab::Raw).then_some(viewer.detail.headers.as_str()),
+                &row.content_type,
+                &mut app.response_save,
+            );
+        });
         return;
     }
     egui::Frame::new()
@@ -1627,6 +1825,24 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         });
 }
 
+fn response_badge(
+    ui: &mut egui::Ui,
+    text: impl Into<String>,
+    foreground: egui::Color32,
+    background: egui::Color32,
+    title: &str,
+) {
+    egui::Frame::new()
+        .fill(background.lerp_to_gamma(foreground, 0.13))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(11.0).strong().color(foreground))
+        })
+        .response
+        .on_hover_text(title);
+}
+
 fn dialogs(app: &mut Recho, ctx: &egui::Context) {
     crate::capture_filter_ui::highlight_dialog(app, ctx);
     if app.connection_open {
@@ -1637,15 +1853,18 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
             .resizable(false)
             .default_width(480.0)
             .show(ctx, |ui| {
-                ui.label(format!("代理地址  127.0.0.1:{}", app.port));
+                let address_ready = app.ready && app.port != 0;
                 ui.horizontal(|ui| {
-                    ui.label("监听端口");
-                    ui.text_edit_singleline(&mut app.port_editor);
-                    if ui.button("应用端口").clicked() {
-                        match app.port_editor.parse::<u16>() {
-                            Ok(port) => app.send(Command::Port(port)),
-                            Err(_) => app.error = Some("端口必须是 0–65535".into()),
-                        }
+                    ui.label(if address_ready {
+                        format!("代理地址  {}", app.proxy_address())
+                    } else {
+                        "正在启动引擎…".into()
+                    });
+                    if ui
+                        .add_enabled(address_ready, egui::Button::new("修改端口号"))
+                        .clicked()
+                    {
+                        app.port_dialog = Some(network_ui::PortDialog::new(app.port));
                     }
                 });
                 let mut intercept = app.intercept_tls;
@@ -1676,11 +1895,19 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
                 if ui.button("安装 CA 证书").clicked() {
                     app.certificates.open(CertificatePage::Local);
                 }
-                if ui.button("复制代理地址").clicked() {
-                    ctx.copy_text(format!("127.0.0.1:{}", app.port));
+                if ui
+                    .add_enabled(address_ready, egui::Button::new("复制代理地址"))
+                    .clicked()
+                {
+                    ctx.copy_text(app.proxy_address());
                 }
             });
         app.connection_open = open;
+    }
+    if let Some(dialog) = &mut app.port_dialog
+        && dialog.show(ctx, &app.worker, app.theme.palette(ctx), app.port)
+    {
+        app.port_dialog = None;
     }
     app.certificates.show(
         ctx,

@@ -985,12 +985,15 @@ impl Engine {
             );
         }
     }
-    async fn state(&self, known: Option<&str>, since: Option<u64>, cursor: Option<&str>) -> Reply {
-        let (proxy_host, proxy_hosts) = if self.config.proxy_host.is_unspecified() {
+    fn proxy_addresses(&self) -> (std::net::Ipv4Addr, Vec<std::net::Ipv4Addr>) {
+        if self.config.proxy_host.is_unspecified() {
             crate::local_network::proxy_addresses()
         } else {
             (self.config.proxy_host, vec![self.config.proxy_host])
-        };
+        }
+    }
+    async fn state(&self, known: Option<&str>, since: Option<u64>, cursor: Option<&str>) -> Reply {
+        let (proxy_host, proxy_hosts) = self.proxy_addresses();
         let proxy = self.proxy.lock().await;
         let history = self.history.lock().unwrap();
         let since = match cursor {
