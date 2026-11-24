@@ -644,7 +644,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
 fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
     let colors = app.theme.palette(ui.ctx());
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(14, 14))
+        .inner_margin(egui::Margin::symmetric(14, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let text = if app.ready {
@@ -652,14 +652,18 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                 } else {
                     "正在启动引擎…".into()
                 };
-                let width = (ui.available_width() - 165.0).max(150.0);
-                egui::Frame::new()
+                let stop_width = 75.0;
+                let clear_width = 33.0;
+                let gap = ui.spacing().item_spacing.x;
+                let address = egui::Frame::new()
                     .fill(colors.chrome)
                     .stroke(egui::Stroke::new(1.0, colors.line))
                     .corner_radius(4)
-                    .inner_margin(8)
+                    .inner_margin(egui::Margin::symmetric(10, 2));
+                let address_width = ui.available_width() - stop_width - clear_width - 2.0 * gap;
+                let address_height = address
                     .show(ui, |ui| {
-                        ui.set_width((width - 16.0).max(120.0));
+                        ui.set_width((address_width - address.total_margin().sum().x).max(120.0));
                         ui.horizontal(|ui| {
                             if ui
                                 .add(
@@ -668,7 +672,8 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                     } else {
                                         colors.muted
                                     }))
-                                    .frame(false),
+                                    .frame(false)
+                                    .min_size(egui::vec2(0.0, 28.0)),
                                 )
                                 .on_hover_text("修改监听端口")
                                 .clicked()
@@ -707,7 +712,10 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                 },
                             );
                         });
-                    });
+                    })
+                    .response
+                    .rect
+                    .height();
                 if ui
                     .add_enabled(
                         app.ready,
@@ -716,13 +724,21 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                         } else {
                             "▶  调试"
                         })
-                        .min_size(egui::vec2(75.0, 38.0)),
+                        .min_size(egui::vec2(stop_width, address_height)),
                     )
                     .clicked()
                 {
                     app.toggle_capture();
                 }
-                if icon_button(ui, "\u{e92e}", "清空捕获", app.ready).clicked() {
+                let clear = ui.add_enabled(
+                    app.ready,
+                    egui::Button::new(icon("\u{e92e}"))
+                        .min_size(egui::vec2(clear_width, address_height)),
+                );
+                clear.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, app.ready, "清空捕获")
+                });
+                if clear.on_hover_text("清空捕获").clicked() {
                     app.clear_confirmation = true;
                 }
             });
