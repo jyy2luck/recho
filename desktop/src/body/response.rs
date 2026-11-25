@@ -1,4 +1,4 @@
-use super::{Content, TextRows, formatted_json, hex_row};
+use super::{Content, FormattedJson, TextRows, formatted_json, hex_row};
 use crate::{BodyFormat, files, theme::Theme};
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -12,7 +12,7 @@ pub type SaveHandle = oneshot::Receiver<Result<bool, String>>;
 pub struct View {
     search: Search,
     tree: Option<Result<Tree, String>>,
-    pretty: Option<Result<Content, String>>,
+    pretty: Option<Result<FormattedJson, String>>,
 }
 
 impl View {
@@ -142,14 +142,15 @@ impl View {
                 .pretty
                 .get_or_insert_with(|| parse_json(bytes).and_then(|value| formatted_json(&value)))
             {
-                Ok(Content::Text { text, index }) => {
-                    show_text(ui, &mut self.search, *format, text, index);
+                Ok(json) => {
+                    self.search.refresh_text(*format, &json.text, &json.index);
+                    let (scroll, _) = self.search.scroll_area(ui, *format);
+                    json.show(ui, scroll, self.search.active());
                 }
                 Err(error) => {
                     self.search.refresh(*format, |_| Vec::new());
                     ui.weak(error.as_str());
                 }
-                Ok(Content::Binary(_)) => unreachable!("pretty JSON is UTF-8 text"),
             },
             BodyFormat::Raw => {
                 if let Content::Text { text, index } = content {
@@ -298,6 +299,16 @@ impl Search {
         self.matches.get(self.current).copied()
     }
 
+    fn refresh_text(&mut self, format: BodyFormat, text: &str, index: &TextRows) {
+        self.refresh(format, |query| {
+            index
+                .rows(text, 0..index.count)
+                .enumerate()
+                .filter_map(|(row, text)| text.to_lowercase().contains(query).then_some(row))
+                .collect()
+        });
+    }
+
     fn scroll_target(&mut self) -> Option<usize> {
         std::mem::take(&mut self.scroll)
             .then(|| self.active())
@@ -334,13 +345,7 @@ fn show_text(
     text: &str,
     index: &TextRows,
 ) {
-    search.refresh(format, |query| {
-        index
-            .rows(text, 0..index.count)
-            .enumerate()
-            .filter_map(|(row, text)| text.to_lowercase().contains(query).then_some(row))
-            .collect()
-    });
+    search.refresh_text(format, text, index);
     let (scroll, height) = search.scroll_area(ui, format);
     scroll.show_rows(ui, height, index.count, |ui, range| {
         for (row, text) in range.clone().zip(index.rows(text, range)) {
