@@ -1005,8 +1005,15 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                     }
                                     let enabled = app.ready && app.spaces.settings.is_none();
                                     let active = app.spaces.incognito;
-                                    let button = egui::Button::selectable(active, icon("\u{e8f5}"))
-                                        .min_size(egui::vec2(28.0, 28.0));
+                                    let button = egui::Button::selectable(
+                                        active,
+                                        if active {
+                                            icon("\u{e8f5}").color(colors.bg)
+                                        } else {
+                                            icon("\u{e8f5}")
+                                        },
+                                    )
+                                    .min_size(egui::vec2(28.0, 28.0));
                                     let toggle = ui.add_enabled(
                                         enabled,
                                         if active {
