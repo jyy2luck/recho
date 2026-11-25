@@ -1,4 +1,5 @@
 use crate::rules_ui::{finished, label};
+use crate::theme::Theme;
 use crate::worker::{RequestHandle, Worker};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use eframe::egui;
@@ -242,9 +243,9 @@ impl McpUi {
         if ready && self.access.is_none() && self.reply.is_none() && self.error.is_none() {
             self.load(worker);
         }
-        let dialog = egui::Modal::new(egui::Id::new("recho_mcp_dialog")).show(ctx, |ui| {
+        let dialog = Theme::modal(ctx, egui::Id::new("recho_mcp_dialog")).show(ctx, |ui| {
             ui.spacing_mut().item_spacing.y = 8.0;
-            ui.set_width(640.0);
+            ui.set_width((ctx.content_rect().width() - 48.0).clamp(360.0, 680.0));
             if self.editor.is_some() {
                 self.edit_token(ui, worker);
             } else if self.confirm_remote {
@@ -355,13 +356,14 @@ impl McpUi {
         ui.heading("配置 MCP 客户端");
         ui.weak("选择要连接 Recho 的客户端");
         ui.separator();
+        let button_width = (ui.available_width() - 16.0) / 3.0;
         egui::Grid::new("mcp_clients")
             .num_columns(3)
             .spacing([8.0, 8.0])
             .show(ui, |ui| {
                 for (index, client) in Client::ALL.into_iter().enumerate() {
                     if ui
-                        .add_sized([205.0, 48.0], egui::Button::new(client.name()))
+                        .add_sized([button_width, 44.0], egui::Button::new(client.name()))
                         .clicked()
                     {
                         self.page = Some(Page::Config(client));
@@ -393,6 +395,17 @@ impl McpUi {
         }
     }
 
+    fn selected_token<'a>(&self, tokens: &'a [Value]) -> Option<&'a str> {
+        if self.reply.is_some() {
+            return None;
+        }
+        tokens
+            .iter()
+            .find(|item| item["id"] == self.selected)
+            .and_then(|item| item["token"].as_str())
+            .filter(|token| !token.is_empty())
+    }
+
     fn client_config(
         &mut self,
         ui: &mut egui::Ui,
@@ -401,93 +414,123 @@ impl McpUi {
         proxy_port: u16,
         ready: bool,
     ) {
-        ui.heading(format!("将 Recho 连接到 {}", client.name()));
-        ui.horizontal(|ui| {
-            for (http, title) in [(false, "Stdio"), (true, "HTTP")] {
-                if ui.selectable_value(&mut self.http, http, title).changed() {
-                    self.copied = None;
-                }
-            }
-        });
+        let colors = Theme::current_palette(ui.ctx());
+        let size = egui::vec2(ui.available_width(), 32.0);
+        ui.allocate_ui_with_layout(
+            size,
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.heading(format!("将 Recho 连接到 {}", client.name()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    for (http, title) in [(true, "HTTP"), (false, "Stdio")] {
+                        let selected = self.http == http;
+                        let text = egui::RichText::new(title).color(if selected {
+                            colors.bg
+                        } else {
+                            colors.text
+                        });
+                        let button = egui::Button::selectable(selected, text)
+                            .min_size(egui::vec2(68.0, 28.0));
+                        let button = if selected {
+                            button.fill(colors.accent)
+                        } else {
+                            button
+                        };
+                        if ui.add(button).clicked() && !selected {
+                            self.http = http;
+                            self.copied = None;
+                        }
+                    }
+                });
+            },
+        );
         ui.separator();
-        ui.label(client.instructions());
+        ui.weak(client.instructions());
         self.availability(ui, worker, ready);
         let access = self.access.clone().unwrap_or(Value::Null);
         let tokens = access["tokens"].as_array().map_or(&[][..], Vec::as_slice);
-        ui.horizontal(|ui| {
-            ui.label("访问令牌");
-            egui::ComboBox::from_id_salt("mcp_token")
-                .selected_text(
-                    tokens
-                        .iter()
-                        .find(|item| item["id"] == self.selected)
-                        .map_or("未选择", |item| label(&item["name"])),
-                )
-                .show_ui(ui, |ui| {
-                    for token in tokens {
+        egui::Grid::new("mcp_connection_options")
+            .num_columns(3)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("访问令牌");
+                egui::ComboBox::from_id_salt("mcp_token")
+                    .selected_text(
+                        tokens
+                            .iter()
+                            .find(|item| item["id"] == self.selected)
+                            .map_or("未选择", |item| label(&item["name"])),
+                    )
+                    .show_ui(ui, |ui| {
+                        for token in tokens {
+                            if ui
+                                .selectable_value(
+                                    &mut self.selected,
+                                    label(&token["id"]).into(),
+                                    label(&token["name"]),
+                                )
+                                .changed()
+                            {
+                                self.copied = None;
+                            }
+                        }
+                    });
+                self.manage_tokens(ui, worker, ready);
+                ui.end_row();
+                ui.label("工具范围");
+                egui::ComboBox::from_id_salt("mcp_scope")
+                    .selected_text(scope(self.all_tools))
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(&mut self.all_tools, false, "minimal · 常用工具")
+                            .changed()
+                            || ui
+                                .selectable_value(&mut self.all_tools, true, "all · 全部工具")
+                                .changed()
+                        {
+                            self.copied = None;
+                        }
+                    });
+                ui.end_row();
+                ui.label("连接地址");
+                egui::ComboBox::from_id_salt("mcp_endpoint")
+                    .selected_text(if self.endpoint_host.is_empty() {
+                        "本机 127.0.0.1"
+                    } else {
+                        &self.endpoint_host
+                    })
+                    .show_ui(ui, |ui| {
                         if ui
                             .selectable_value(
-                                &mut self.selected,
-                                label(&token["id"]).into(),
-                                label(&token["name"]),
+                                &mut self.endpoint_host,
+                                String::new(),
+                                "本机 127.0.0.1",
                             )
                             .changed()
                         {
                             self.copied = None;
                         }
-                    }
-                });
-            self.manage_tokens(ui, worker, ready);
-        });
-        ui.horizontal_wrapped(|ui| {
-            ui.label("工具范围");
-            egui::ComboBox::from_id_salt("mcp_scope")
-                .selected_text(scope(self.all_tools))
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_value(&mut self.all_tools, false, "minimal · 常用工具")
-                        .changed()
-                        || ui
-                            .selectable_value(&mut self.all_tools, true, "all · 全部工具")
-                            .changed()
-                    {
-                        self.copied = None;
-                    }
-                });
-            ui.label("连接地址");
-            egui::ComboBox::from_id_salt("mcp_endpoint")
-                .selected_text(if self.endpoint_host.is_empty() {
-                    "本机 127.0.0.1"
-                } else {
-                    &self.endpoint_host
-                })
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_value(&mut self.endpoint_host, String::new(), "本机 127.0.0.1")
-                        .changed()
-                    {
-                        self.copied = None;
-                    }
-                    for addr in access["addresses"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .filter(|addr| *addr != "127.0.0.1")
-                    {
-                        if ui
-                            .add_enabled(
-                                access["remoteEnabled"] == true,
-                                egui::Button::selectable(self.endpoint_host == addr, addr),
-                            )
-                            .clicked()
+                        for addr in access["addresses"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .filter(|addr| *addr != "127.0.0.1")
                         {
-                            self.endpoint_host = addr.to_owned();
-                            self.copied = None;
+                            if ui
+                                .add_enabled(
+                                    access["remoteEnabled"] == true,
+                                    egui::Button::selectable(self.endpoint_host == addr, addr),
+                                )
+                                .clicked()
+                            {
+                                self.endpoint_host = addr.to_owned();
+                                self.copied = None;
+                            }
                         }
-                    }
-                });
-        });
+                    });
+                ui.end_row();
+            });
         let (host, port) = if self.endpoint_host.is_empty() || access["remoteEnabled"] != true {
             ("127.0.0.1", proxy_port)
         } else {
@@ -499,46 +542,31 @@ impl McpUi {
                     .unwrap_or_default(),
             )
         };
-        let token = tokens
-            .iter()
-            .find(|item| item["id"] == self.selected)
-            .map(|item| label(&item["token"]));
+        let token = self.selected_token(tokens);
+        let can_copy = token.is_some();
         let executable = std::env::current_exe().ok();
         let path = executable.as_deref().and_then(std::path::Path::to_str);
-        let preview = Config::new(
+        let config = Config::new(
             client,
             self.http,
             host,
             port,
             scope(self.all_tools),
             path,
-            "<ACCESS_TOKEN>",
+            token.unwrap_or("<ACCESS_TOKEN>"),
         );
-        let actual = token
-            .filter(|_| self.reply.is_none() && self.access.is_some())
-            .and_then(|token| {
-                Config::new(
-                    client,
-                    self.http,
-                    host,
-                    port,
-                    scope(self.all_tools),
-                    path,
-                    token,
-                )
-            });
-        let max_height = (ui.ctx().content_rect().height() - 285.0).clamp(140.0, 355.0);
+        let max_height = (ui.ctx().content_rect().height() - 300.0).clamp(140.0, 440.0);
         egui::ScrollArea::vertical()
             .id_salt((client.name(), self.http))
             .max_height(max_height)
             .show(ui, |ui| {
-                if let Some(preview) = preview {
-                    if let Some(command) = preview.command() {
+                if let Some(config) = &config {
+                    if let Some(command) = config.command() {
                         code_block(
                             ui,
                             "终端命令",
                             &command,
-                            actual.as_ref().and_then(Config::command),
+                            can_copy,
                             "复制命令",
                             &mut self.copied,
                         );
@@ -546,29 +574,22 @@ impl McpUi {
                     code_block(
                         ui,
                         "手动配置",
-                        &preview.text(),
-                        actual.as_ref().map(Config::text),
+                        &config.text(),
+                        can_copy,
                         "复制配置",
                         &mut self.copied,
                     );
                     let (title, value) = if self.http {
-                        ("服务器 URL", preview.endpoint())
+                        ("服务器 URL", config.endpoint())
                     } else {
                         ("辅助程序路径", path.unwrap_or_default())
                     };
-                    code_block(
-                        ui,
-                        title,
-                        value,
-                        Some(value.into()),
-                        "复制地址或路径",
-                        &mut self.copied,
-                    );
+                    code_block(ui, title, value, true, "复制地址或路径", &mut self.copied);
                 } else {
                     ui.label("等待代理端口或 Stdio 辅助程序可用。");
                 }
             });
-        if token.is_none() && self.access.is_some() {
+        if !can_copy && self.access.is_some() && self.reply.is_none() {
             ui.weak("请先新建访问令牌，然后复制命令或配置。");
         }
         if self.http && access["remoteEnabled"] != true {
@@ -584,7 +605,10 @@ impl McpUi {
                 self.back();
             }
             if matches!(client, Client::Cursor | Client::VsCode) {
-                let link = actual.as_ref().and_then(Config::install_link);
+                let link = config
+                    .as_ref()
+                    .filter(|_| can_copy)
+                    .and_then(Config::install_link);
                 if ui
                     .add_enabled(link.is_some(), egui::Button::new("在客户端安装"))
                     .clicked()
@@ -751,33 +775,49 @@ impl McpUi {
 
 fn footer<T>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> T) -> T {
     ui.separator();
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), contents)
-        .inner
+    let size = egui::vec2(ui.available_width(), 30.0);
+    ui.allocate_ui_with_layout(
+        size,
+        egui::Layout::right_to_left(egui::Align::Center),
+        contents,
+    )
+    .inner
 }
 
 fn code_block(
     ui: &mut egui::Ui,
     title: &str,
-    preview: &str,
-    copy: Option<String>,
+    text: &str,
+    can_copy: bool,
     button: &'static str,
     feedback: &mut Option<&'static str>,
 ) {
-    ui.horizontal(|ui| {
-        ui.strong(title);
-        if ui
-            .add_enabled(copy.is_some(), egui::Button::new(button))
-            .clicked()
-            && let Some(copy) = copy
-        {
-            ui.ctx().copy_text(copy);
-            *feedback = Some("已复制到剪贴板");
-        }
-    });
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.add(egui::Label::new(egui::RichText::new(preview).monospace()).wrap());
-    });
+    let colors = Theme::current_palette(ui.ctx());
+    egui::Frame::new()
+        .fill(ui.visuals().code_bg_color)
+        .stroke(egui::Stroke::new(1.0, colors.line))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            let size = egui::vec2(ui.available_width(), 26.0);
+            ui.allocate_ui_with_layout(
+                size,
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.strong(title);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(can_copy, egui::Button::new(button))
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(text.into());
+                            *feedback = Some("已复制到剪贴板");
+                        }
+                    });
+                },
+            );
+            ui.add(egui::Label::new(egui::RichText::new(text).monospace()).wrap());
+        });
 }
 
 fn mask_token(token: &str) -> String {
@@ -1099,6 +1139,37 @@ mod tests {
         assert_eq!(decoded, cursor.server);
         let vscode = fixture(Client::VsCode, true).install_link().unwrap();
         assert!(vscode.query().unwrap().contains("Bearer%20fixture"));
+    }
+
+    #[test]
+    fn selected_token_fills_the_stdin_and_http_configuration() {
+        let tokens = [
+            json!({"id": "first", "token": "first-fixture"}),
+            json!({"id": "second", "token": "second-fixture"}),
+        ];
+        let mut ui = McpUi::default();
+        assert_eq!(ui.selected_token(&tokens), None);
+
+        for (id, credential) in [("first", "first-fixture"), ("second", "second-fixture")] {
+            ui.selected = id.into();
+            let token = ui.selected_token(&tokens).unwrap();
+            assert_eq!(token, credential);
+            for http in [false, true] {
+                let config = Config::new(
+                    Client::Codex,
+                    http,
+                    "127.0.0.1",
+                    9988,
+                    "minimal",
+                    Some("/App/recho"),
+                    token,
+                )
+                .unwrap();
+                assert!(config.text().contains(credential));
+                assert!(config.command().unwrap().contains(credential));
+            }
+        }
+        assert_eq!(ui.selected_token(&tokens[..1]), None);
     }
 
     #[test]

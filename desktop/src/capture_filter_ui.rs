@@ -1,10 +1,13 @@
-use crate::{Recho, theme::Theme, workbench::icon};
+use crate::{
+    Recho,
+    theme::{CONTROL_HEIGHT, Theme, input_text},
+    workbench::icon,
+};
 use eframe::egui;
 use egui_extras::{Size, StripBuilder};
 use recho_core::native::{Condition, ConditionSet, Field};
 
 const MAX_CONDITIONS: usize = 32;
-const ROW_HEIGHT: f32 = 32.0;
 const MODIFIER_WIDTH: f32 = 28.0;
 
 pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
@@ -138,10 +141,14 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
             for (index, item) in conditions.items.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(width, ROW_HEIGHT),
+                        egui::vec2(width, CONTROL_HEIGHT),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            ui.spacing_mut().button_padding = egui::vec2(8.0, 5.0);
+                            let combo_height = ui
+                                .text_style_height(&egui::TextStyle::Button)
+                                .max(ui.spacing().icon_width);
+                            ui.spacing_mut().button_padding =
+                                egui::vec2(8.0, ((CONTROL_HEIGHT - combo_height) * 0.5).max(0.0));
                             StripBuilder::new(ui)
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                                 .size(Size::exact(26.0))
@@ -161,8 +168,14 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
                                         });
                                         changed |= enabled.changed();
                                     });
-                                    row.cell(|ui| changed |= field_picker(ui, item, highlight));
-                                    row.cell(|ui| changed |= operator_picker(ui, item));
+                                    row.cell(|ui| {
+                                        ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                                        changed |= field_picker(ui, item, highlight);
+                                    });
+                                    row.cell(|ui| {
+                                        ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                                        changed |= operator_picker(ui, item);
+                                    });
                                     row.cell(|ui| changed |= condition_value(ui, item));
                                     row.cell(|ui| {
                                         if row_button(ui, "−", "删除条件", true).clicked() {
@@ -243,28 +256,16 @@ fn operator_picker(ui: &mut egui::Ui, item: &mut Condition) -> bool {
 fn condition_value(parent: &mut egui::Ui, item: &mut Condition) -> bool {
     let colors = Theme::current_palette(parent.ctx());
     let width = parent.available_width() - 2.0;
-    let mut frame = egui::Frame::new()
-        .fill(colors.bg)
-        .stroke(egui::Stroke::new(1.0, colors.line))
-        .corner_radius(5)
-        .begin(parent);
+    let mut frame = colors.input_frame().begin(parent);
     let ui = &mut frame.content_ui;
-    ui.set_min_size(egui::vec2(width, ROW_HEIGHT - 2.0));
+    ui.set_min_size(egui::vec2(width, CONTROL_HEIGHT - 2.0));
     ui.spacing_mut().item_spacing.x = 4.0;
     ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
     let changed = if item.field.choices().is_empty() {
         let supports_deep = item.field.supports_deep();
         let modifiers = if supports_deep { 2.0 } else { 1.0 };
         let text_width = width - modifiers * (MODIFIER_WIDTH + 4.0) - 4.0;
-        let value = ui.add(
-            egui::TextEdit::singleline(&mut item.value)
-                .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)))
-                .vertical_align(egui::Align::Center)
-                .hint_text("搜索内容")
-                .char_limit(4096)
-                .min_size(egui::vec2(text_width, ROW_HEIGHT - 2.0))
-                .desired_width(text_width),
-        );
+        let value = ui.add(input_text(&mut item.value, "搜索内容", text_width).char_limit(4096));
         ui.ctx()
             .accesskit_node_builder(value.id, |node| node.set_label("搜索内容"));
         if value.has_focus() {

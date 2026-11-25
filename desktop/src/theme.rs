@@ -61,6 +61,30 @@ pub(super) struct Palette {
     pub(super) key: Color32,
 }
 
+pub(super) const CONTROL_HEIGHT: f32 = 32.0;
+
+impl Palette {
+    pub(super) fn input_frame(self) -> egui::Frame {
+        egui::Frame::new()
+            .fill(self.bg)
+            .stroke(egui::Stroke::new(1.0, self.line))
+            .corner_radius(5)
+    }
+}
+
+pub(super) fn input_text<'a>(
+    value: &'a mut String,
+    label: &'static str,
+    width: f32,
+) -> egui::TextEdit<'a> {
+    egui::TextEdit::singleline(value)
+        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 0)))
+        .vertical_align(egui::Align::Center)
+        .hint_text(label)
+        .min_size(egui::vec2(width, CONTROL_HEIGHT - 2.0))
+        .desired_width(width)
+}
+
 fn rgb(value: u32) -> Color32 {
     Color32::from_rgb((value >> 16) as u8, (value >> 8) as u8, value as u8)
 }
@@ -273,6 +297,10 @@ impl Theme {
         color.palette(ctx.theme())
     }
 
+    pub(super) fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+        egui::Modal::new(id).frame(egui::Frame::window(&ctx.global_style()))
+    }
+
     pub(super) fn apply(self, ctx: &egui::Context) {
         ctx.set_theme(match self.appearance {
             Appearance::System => egui::ThemePreference::System,
@@ -286,9 +314,11 @@ impl Theme {
                 style.animation_time = 0.0;
                 style.spacing.item_spacing = egui::vec2(6.0, 4.0);
                 style.spacing.button_padding = egui::vec2(7.0, 4.0);
+                style.spacing.window_margin = egui::Margin::same(18);
                 let visuals = &mut style.visuals;
                 visuals.panel_fill = p.bg;
-                visuals.window_fill = p.side;
+                visuals.window_fill = p.bg;
+                visuals.window_corner_radius = egui::CornerRadius::same(10);
                 visuals.extreme_bg_color = p.bg;
                 visuals.faint_bg_color = p.side;
                 visuals.code_bg_color = p.code;

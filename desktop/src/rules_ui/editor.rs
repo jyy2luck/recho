@@ -1,5 +1,6 @@
 use super::breakpoint::{header_lines, text_area};
 use super::{RequestHandle, RuleCategory, Value, Worker, egui, finished, json, label};
+use crate::theme::Theme;
 use recho_core::native::parse_header_lines;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -224,7 +225,7 @@ impl RuleEditor {
         let mut switch_mode = false;
         let mut save = false;
         let mut cancel = false;
-        let reply = egui::Modal::new(egui::Id::new("rule_editor")).show(ctx, |ui| {
+        let reply = Theme::modal(ctx, egui::Id::new("rule_editor")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 52.0).min(800.0));
             ui.heading(if self.baseline.is_some() {
                 "编辑规则"

@@ -1,5 +1,6 @@
 use crate::{
     body::{Content, hex_row, show_structured},
+    theme::{CONTROL_HEIGHT, Theme, input_text},
     worker::{DetailHandle, RequestHandle, Worker},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -946,6 +947,7 @@ impl Composer {
         let mut action = None;
         let busy = self.sending.contains_key(&self.active);
         let loading = self.importing.contains_key(&self.active);
+        let allow_curl = self.transfer.is_none();
         let environments = rows(document, "environments")
             .iter()
             .map(|entry| (text(entry, "id").to_owned(), text(entry, "name").to_owned()))
@@ -1010,42 +1012,44 @@ impl Composer {
                 });
             });
             ui.separator();
-            ui.horizontal(|ui| {
-                if !raw {
-                    changed |= choice(ui, request, "method", "请求方法", &METHODS);
-                }
-                let url = line(
-                    ui,
-                    request,
-                    "url",
-                    if raw {
-                        "连接目标 URL"
-                    } else {
-                        "输入请求 URL"
-                    },
-                    (ui.available_width() - 92.0).max(140.0),
-                );
-                if url.changed() {
-                    changed = true;
-                    if text(request, "url").trim_start().starts_with("curl ") && !raw {
-                        draft_import = Some("导入 cURL");
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), CONTROL_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                    if !raw {
+                        changed |= choice(ui, request, "method", "请求方法", &METHODS);
                     }
-                }
-                let send = ui.add_enabled(
-                    !loading,
-                    egui::Button::new(if busy { "取消" } else { "发送" })
-                        .fill(ui.visuals().selection.bg_fill)
-                        .min_size([78.0, 28.0].into()),
-                );
-                if send.clicked()
-                    || (!busy
-                        && !loading
-                        && url.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                {
-                    action = Some(busy);
-                }
-            });
+                    let send_width = 78.0;
+                    let width = ui.available_width() - send_width - ui.spacing().item_spacing.x;
+                    let (url, imported) = request_url(ui, request, width, raw, allow_curl);
+                    changed |= url.changed();
+                    match imported {
+                        Some(Ok(())) => {
+                            self.errors.remove(&self.active);
+                            changed = true;
+                        }
+                        Some(Err(error)) => {
+                            self.errors.insert(self.active.clone(), error);
+                        }
+                        None => {}
+                    }
+                    let send = ui.add_enabled(
+                        !loading,
+                        egui::Button::new(if busy { "取消" } else { "发送" })
+                            .fill(ui.visuals().selection.bg_fill)
+                            .min_size([send_width, CONTROL_HEIGHT].into()),
+                    );
+                    if send.clicked()
+                        || (!busy
+                            && !loading
+                            && url.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    {
+                        action = Some(busy);
+                    }
+                },
+            );
             if loading {
                 ui.weak("正在读取捕获正文…");
             }
@@ -1156,17 +1160,9 @@ impl Composer {
             self.save_dialog(index, false, false);
         }
         if let Some(kind) = draft_import {
-            let input = if kind == "导入 cURL" {
-                text(&requests_at(self.document.as_ref(), index), "url")
-                    .trim_start()
-                    .strip_prefix("curl ")
-                    .map_or(String::new(), |command| format!("curl {command}"))
-            } else {
-                String::new()
-            };
             self.transfer = Some(Transfer {
                 kind,
-                text: input,
+                text: String::new(),
                 target: (kind == "导入 cURL").then(|| self.active.clone()),
                 error: None,
             });
@@ -1477,24 +1473,7 @@ impl Composer {
             if let Some(value) = parsed {
                 if let Some(target) = &item.target {
                     if let Some(request) = self.request_mut(target) {
-                        for key in [
-                            "method",
-                            "url",
-                            "headers",
-                            "headerFields",
-                            "body",
-                            "bodyMode",
-                            "bodyFields",
-                            "bodyFile",
-                            "bodyMIME",
-                            "authorizationType",
-                            "authorizationUser",
-                            "authorizationSecret",
-                            "protocolVersion",
-                        ] {
-                            request[key] = value[key].clone();
-                        }
-                        request["bodyIncomplete"] = json!(false);
+                        apply_curl(request, value);
                         self.mark_dirty();
                     }
                 } else {
@@ -1787,6 +1766,72 @@ fn line(
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, label));
     response
+}
+fn request_url(
+    ui: &mut egui::Ui,
+    request: &mut Value,
+    width: f32,
+    raw: bool,
+    allow_curl: bool,
+) -> (egui::Response, Option<Result<(), String>>) {
+    let label = if raw {
+        "连接目标 URL"
+    } else {
+        "输入请求 URL"
+    };
+    let id = ui.make_persistent_id("request_url");
+    let colors = Theme::current_palette(ui.ctx());
+    let mut frame = colors.input_frame().begin(ui);
+    let input = &mut frame.content_ui;
+    // Single-line TextEdit replaces clipboard newlines, including shell continuations.
+    let imported = if allow_curl && !raw && input.memory(|memory| memory.has_focus(id)) {
+        input
+            .input_mut(|input| {
+                let at = input.events.iter().rposition(|event| {
+                    matches!(event, egui::Event::Paste(command) if matches!(
+                        command.split_whitespace().next(),
+                        Some("curl" | "curl.exe")
+                    ))
+                })?;
+                let egui::Event::Paste(command) = input.events.remove(at) else {
+                    unreachable!()
+                };
+                Some(command)
+            })
+            .map(|command| request_from_curl(&command).map(|value| apply_curl(request, value)))
+    } else {
+        None
+    };
+    let response =
+        input.add(input_text(object_text(request, "url"), label, (width - 2.0).max(1.0)).id(id));
+    input
+        .ctx()
+        .accesskit_node_builder(response.id, |node| node.set_label(label));
+    if response.has_focus() {
+        frame.frame.stroke.color = colors.accent;
+    }
+    frame.end(ui);
+    (response, imported)
+}
+fn apply_curl(request: &mut Value, mut imported: Value) {
+    for key in [
+        "method",
+        "url",
+        "headers",
+        "headerFields",
+        "body",
+        "bodyMode",
+        "bodyFields",
+        "bodyFile",
+        "bodyMIME",
+        "authorizationType",
+        "authorizationUser",
+        "authorizationSecret",
+        "protocolVersion",
+    ] {
+        request[key] = imported[key].take();
+    }
+    request["bodyIncomplete"] = json!(false);
 }
 fn multiline(ui: &mut egui::Ui, value: &mut Value, key: &str, label: &str, rows: usize) -> bool {
     let response = ui.add(
@@ -2122,5 +2167,79 @@ fn show_reply(ui: &mut egui::Ui, reply: &mut Reply, tab: &str) {
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pasting_capture_curl_imports_request_fields() {
+        let row = Row {
+            id: "capture".into(),
+            method: "PATCH".into(),
+            url: "https://example.test/items?tag=%2F".into(),
+            status: 200,
+            duration_ms: 0,
+            response_bytes: 0,
+            host: "example.test".into(),
+            application: String::new(),
+            application_path: None,
+            server_ip: String::new(),
+            protocol: "HTTP/2".into(),
+            content_type: String::new(),
+            websocket: false,
+            binary: false,
+            error: None,
+            group: String::new(),
+            started_at: String::new(),
+            incognito: false,
+            list_matches: Default::default(),
+        };
+        let headers = "Content-Type: text/plain\r\nX-Test: one\r\nX-Test: two";
+        let bytes = "it's a body\nwith two lines".as_bytes();
+        let detail = Detail {
+            id: row.id.clone(),
+            phase: Phase::Request,
+            headers: headers.into(),
+            trailers: String::new(),
+            bytes: bytes.to_vec(),
+            notice: None,
+        };
+        let command = capture_curl(&row, &detail, &detail.bytes).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut request = draft("http");
+        let request_id = request["id"].clone();
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            request_url(ui, &mut request, 400.0, false, true)
+                .0
+                .request_focus();
+        })
+        .drop_without_applying_deltas();
+        let mut paste = |text| {
+            let mut imported = None;
+            ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Paste(text)],
+                    ..Default::default()
+                },
+                |ui| imported = request_url(ui, &mut request, 400.0, false, true).1,
+            )
+            .drop_without_applying_deltas();
+            imported
+        };
+        assert_eq!(paste(command), Some(Ok(())));
+        assert!(matches!(
+            paste("curl --unsupported https://example.test/".into()),
+            Some(Err(_))
+        ));
+        assert_eq!(request["id"], request_id);
+        assert_eq!(request["method"], row.method);
+        assert_eq!(request["url"], row.url);
+        assert_eq!(request["protocolVersion"], row.protocol);
+        assert_eq!(request["headers"], headers);
+        assert_eq!(request["body"].as_str().unwrap().as_bytes(), bytes);
     }
 }

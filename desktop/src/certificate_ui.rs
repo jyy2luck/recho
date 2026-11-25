@@ -1,7 +1,7 @@
 use crate::{
     files::{self, FilePick},
     platform::{CERTIFICATE_DOWNLOAD_URL, CertificateAction, CertificateFormat, Certificates},
-    theme::Palette,
+    theme::{Palette, Theme},
 };
 use eframe::egui::{self, RichText};
 use std::{
@@ -69,6 +69,7 @@ pub(super) struct CertificateUi {
     page: Option<Page>,
     return_local: bool,
     manual: bool,
+    android_usb: bool,
     qr_open: bool,
     lan: Ipv4Addr,
     adb: PathBuf,
@@ -85,6 +86,7 @@ impl Default for CertificateUi {
             page: None,
             return_local: false,
             manual: false,
+            android_usb: false,
             qr_open: false,
             lan: Ipv4Addr::LOCALHOST,
             adb: PathBuf::new(),
@@ -107,18 +109,20 @@ impl CertificateUi {
     fn enter(&mut self, page: Page) {
         self.page = Some(page);
         self.qr_open = false;
+        if matches!(page, Page::Android | Page::Ios) {
+            self.lan = recho_core::native::proxy_addresses().0;
+        }
+        if page == Page::Android {
+            self.android_usb = false;
+        }
         self.pending = match page {
             Page::Local | Page::Detail => Some(Action::Check),
-            Page::Android => Some(Action::AndroidDevices(self.adb.clone())),
             Page::Java if !self.java.as_os_str().is_empty() => {
                 Some(Action::JavaCheck(self.java.clone()))
             }
             Page::Magisk => Some(Action::Details),
             _ => None,
         };
-        if page == Page::Ios {
-            self.lan = recho_core::native::proxy_addresses().0;
-        }
         self.backend.notice = None;
         self.backend.error = None;
     }
@@ -210,83 +214,77 @@ impl CertificateUi {
         let Some(page) = self.page else {
             return;
         };
-        let width = (ctx.content_rect().width() - 54.0).clamp(240.0, 565.0);
+        let max_width = if page == Page::Android { 620.0 } else { 565.0 };
+        let width = (ctx.content_rect().width() - 54.0).clamp(240.0, max_width);
         let height = (ctx.content_rect().height() - 172.0).clamp(
             160.0,
             match page {
-                Page::Local | Page::Android | Page::Java => 319.0,
+                Page::Local | Page::Java => 319.0,
                 Page::Detail | Page::Magisk => 376.0,
-                Page::Ios | Page::Firefox => 496.0,
+                Page::Android | Page::Ios | Page::Firefox => 496.0,
             },
         );
         let enabled =
             ready && self.picker.is_none() && self.pending.is_none() && !self.backend.busy();
-        let frame = egui::Frame::window(&ctx.global_style())
-            .fill(colors.side)
-            .inner_margin(egui::Margin::same(18));
-        let modal = egui::Modal::new(egui::Id::new("certificate_panel"))
-            .frame(frame)
-            .show(ctx, |ui| {
-                ui.set_width(width);
-                ui.horizontal(|ui| {
-                    ui.heading(page.title());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if page == Page::Local {
-                            if ui.selectable_label(self.manual, "手动").clicked() {
-                                self.manual = true;
-                            }
-                            if ui.selectable_label(!self.manual, "自动").clicked() && self.manual
-                            {
-                                self.manual = false;
-                                self.pending = Some(Action::Check);
-                            }
+        let modal = Theme::modal(ctx, egui::Id::new("certificate_panel")).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.horizontal(|ui| {
+                ui.heading(page.title());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if page == Page::Local {
+                        if ui.selectable_label(self.manual, "手动").clicked() {
+                            self.manual = true;
                         }
-                    });
-                });
-                ui.add_space(6.0);
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt((page.title(), self.manual))
-                    .max_height(height)
-                    .min_scrolled_height(height)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(9.0);
-                        ui.add_enabled_ui(enabled, |ui| match page {
-                            Page::Local if self.manual => self.local_manual(ui),
-                            Page::Local => self.local_auto(ui, colors),
-                            Page::Android => self.android(ui, colors),
-                            Page::Ios => self.ios(ui, port, running),
-                            Page::Firefox => self.firefox(ui),
-                            Page::Magisk => self.magisk(ui),
-                            Page::Java => self.java(ui, colors),
-                            Page::Detail => self.details(ui, colors),
-                        });
-                    });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if let Some(error) = &self.backend.error {
-                        ui.colored_label(colors.red, error);
-                    } else if let Some(notice) = &self.backend.notice {
-                        ui.colored_label(colors.green, notice);
-                    } else if self.picker.is_some() || !enabled {
-                        ui.spinner();
-                        ui.weak("正在处理…");
+                        if ui.selectable_label(!self.manual, "自动").clicked() && self.manual {
+                            self.manual = false;
+                            self.pending = Some(Action::Check);
+                        }
                     }
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let label = if self.return_local {
-                        "返回"
-                    } else if page == Page::Detail {
-                        "关闭"
-                    } else {
-                        "完成"
-                    };
-                    ui.add_enabled(self.picker.is_none(), egui::Button::new(label))
-                        .clicked()
-                })
-                .inner
             });
+            ui.add_space(6.0);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt((page.title(), self.manual))
+                .max_height(height)
+                .auto_shrink([false, page == Page::Android])
+                .show(ui, |ui| {
+                    ui.add_space(9.0);
+                    ui.add_enabled_ui(enabled, |ui| match page {
+                        Page::Local if self.manual => self.local_manual(ui),
+                        Page::Local => self.local_auto(ui, colors),
+                        Page::Android => self.android(ui, colors, port, running),
+                        Page::Ios => self.ios(ui, port, running),
+                        Page::Firefox => self.firefox(ui),
+                        Page::Magisk => self.magisk(ui),
+                        Page::Java => self.java(ui, colors),
+                        Page::Detail => self.details(ui, colors),
+                    });
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if let Some(error) = &self.backend.error {
+                    ui.colored_label(colors.red, error);
+                } else if let Some(notice) = &self.backend.notice {
+                    ui.colored_label(colors.green, notice);
+                } else if self.picker.is_some() || !enabled {
+                    ui.spinner();
+                    ui.weak("正在处理…");
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if self.return_local {
+                    "返回"
+                } else if page == Page::Detail {
+                    "关闭"
+                } else {
+                    "完成"
+                };
+                ui.add_enabled(self.picker.is_none(), egui::Button::new(label))
+                    .clicked()
+            })
+            .inner
+        });
         if self.picker.is_none() && (modal.inner || modal.should_close()) {
             if self.qr_open && !modal.inner {
                 self.qr_open = false;
@@ -381,17 +379,118 @@ impl CertificateUi {
         }
     }
 
-    fn android(&mut self, ui: &mut egui::Ui, colors: Palette) {
-        ui.label("用 USB 连接设备，开启 USB 调试，并在设备上批准调试授权。");
-        ui.horizontal(|ui| {
-            if ui.button("重新加载").clicked() {
+    fn android(&mut self, ui: &mut egui::Ui, colors: Palette, port: u16, running: bool) {
+        ui.strong("1. 获取 CA 证书");
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add(
+                    egui::Button::selectable(!self.android_usb, "Wi-Fi 下载")
+                        .min_size(egui::vec2(92.0, 30.0)),
+                )
+                .clicked()
+                && self.android_usb
+            {
+                self.android_usb = false;
+                self.backend.error = None;
+                self.backend.notice = None;
+                self.lan = recho_core::native::proxy_addresses().0;
+            }
+            if ui
+                .add(
+                    egui::Button::selectable(self.android_usb, "USB / ADB")
+                        .min_size(egui::vec2(92.0, 30.0)),
+                )
+                .clicked()
+                && !self.android_usb
+            {
+                self.android_usb = true;
+                self.pending = Some(Action::AndroidDevices(self.adb.clone()));
+            }
+            self.export_button(ui, "导出 .crt", CertificateFormat::Der);
+        });
+        ui.add_space(5.0);
+        let width = ui.available_width();
+        let card = egui::Frame::new()
+            .fill(colors.bg)
+            .stroke(egui::Stroke::new(1.0, colors.line))
+            .corner_radius(6)
+            .inner_margin(egui::Margin::same(12));
+        card.show(ui, |ui| {
+            ui.set_width(width - card.total_margin().sum().x);
+            if self.android_usb {
+                self.android_adb(ui, colors);
+            } else {
+                self.android_wifi(ui, port, running);
+            }
+        });
+        step(
+            ui,
+            "2. 在手机上安装",
+            "在 Android 设置中打开「安全 → 加密与凭据 → 安装证书 → CA 证书」，选择下载或发送到手机的证书。菜单名称可能因系统版本而异。",
+        );
+    }
+
+    fn android_wifi(&self, ui: &mut egui::Ui, port: u16, running: bool) {
+        let has_address = !self.lan.is_loopback() && port != 0;
+        let can_download = has_address && running;
+        let width = ui.available_width();
+        let beside = can_download && width >= 430.0;
+        let qr_width = 148.0;
+        let text_width = if beside {
+            width - qr_width - ui.spacing().item_spacing.x
+        } else {
+            width
+        };
+        let layout = if beside {
+            egui::Layout::left_to_right(egui::Align::Min)
+        } else {
+            egui::Layout::top_down(egui::Align::Min)
+        };
+        ui.with_layout(layout, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(text_width);
+                ui.strong("配置 Wi-Fi 代理");
+                ui.label("将手机与电脑连到同一网络，在手机 Wi-Fi 设置中选择「手动代理」。");
+                if has_address {
+                    copy_row(ui, "主机", &self.lan.to_string());
+                    copy_row(ui, "端口", &port.to_string());
+                } else {
+                    ui.weak(
+                        "未获取到局域网代理地址。连接网络后重新打开此页，或通过 USB 获取证书。",
+                    );
+                }
+                if can_download {
+                    step(
+                        ui,
+                        "下载 CA 证书",
+                        "保存代理设置后，在手机浏览器扫码或打开下载地址。",
+                    );
+                    copy_row(ui, "下载地址", CERTIFICATE_DOWNLOAD_URL);
+                } else if has_address {
+                    ui.weak("启动调试后即可扫码下载证书。");
+                }
+            });
+            if can_download {
+                ui.vertical_centered(|ui| {
+                    ui.set_width(qr_width.min(width));
+                    show_qr(ui);
+                });
+            }
+        });
+    }
+
+    fn android_adb(&mut self, ui: &mut egui::Ui, colors: Palette) {
+        ui.strong("通过 USB 发送证书");
+        ui.label("用 USB 连接手机，开启 USB 调试，并在手机上批准调试授权。");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("刷新设备").clicked() {
                 self.pending = Some(Action::AndroidDevices(self.adb.clone()));
             }
             if ui.button("ADB 路径…").clicked() {
                 self.picker = Some((Pick::Adb, files::pick("", false, ui.ctx())));
             }
             ui.weak(if self.adb.as_os_str().is_empty() {
-                "自动查找".into()
+                "自动查找 ADB".into()
             } else {
                 self.adb.display().to_string()
             });
@@ -410,7 +509,7 @@ impl CertificateUi {
                     state => state,
                 };
                 ui.weak(format!("{} · {}", device.serial, status));
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui
                         .add_enabled(device.state == "device", egui::Button::new("发送 CA 证书"))
                         .clicked()
@@ -433,12 +532,6 @@ impl CertificateUi {
                 });
             });
         }
-        step(
-            ui,
-            "在 Android 上完成安装",
-            "在「设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书」选择已发送或手动复制的证书。菜单名称可能因系统版本而异。",
-        );
-        self.export_button(ui, "手动导出 .crt", CertificateFormat::Der);
     }
 
     fn ios(&mut self, ui: &mut egui::Ui, port: u16, running: bool) {
@@ -640,5 +733,27 @@ fn show_qr(ui: &mut egui::Ui) {
                 egui::Rect::from_min_size(origin + point * scale, egui::Vec2::splat(scale));
             ui.painter().rect_filled(module, 0.0, egui::Color32::BLACK);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn android_opens_on_wifi_without_requiring_adb() {
+        let adb = PathBuf::from("platform-tools").join("adb");
+        let mut certificates = CertificateUi {
+            adb: adb.clone(),
+            android_usb: true,
+            pending: Some(Action::AndroidDevices(adb.clone())),
+            ..CertificateUi::default()
+        };
+
+        certificates.open(Page::Android);
+
+        assert!(!certificates.android_usb);
+        assert!(certificates.pending.is_none());
+        assert_eq!(certificates.adb, adb);
     }
 }

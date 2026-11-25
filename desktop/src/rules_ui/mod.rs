@@ -1,6 +1,7 @@
 mod breakpoint;
 mod editor;
 
+use crate::theme::Theme;
 use crate::worker::{RequestHandle, Worker};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -632,7 +633,7 @@ impl RulesUi {
             self.save_editor(worker, value);
         }
         if let Some(item) = &self.delete {
-            let reply = egui::Modal::new(egui::Id::new("delete_rule")).show(ctx, |ui| {
+            let reply = Theme::modal(ctx, egui::Id::new("delete_rule")).show(ctx, |ui| {
                 ui.heading("删除规则");
                 ui.label(format!("确定删除「{}」？", label(&item["name"])));
                 ui.horizontal(|ui| (ui.button("取消").clicked(), ui.button("删除规则").clicked()))
@@ -705,7 +706,7 @@ impl RulesUi {
         let Some(name) = &mut self.new_folder else {
             return;
         };
-        let reply = egui::Modal::new(egui::Id::new("add_rule_folder")).show(ctx, |ui| {
+        let reply = Theme::modal(ctx, egui::Id::new("add_rule_folder")).show(ctx, |ui| {
             ui.heading("新建文件夹");
             ui.add(egui::TextEdit::singleline(name).hint_text("文件夹名称或子路径"));
             ui.horizontal(|ui| {
@@ -746,7 +747,7 @@ impl RulesUi {
 
     fn log_dialog(&mut self, ctx: &egui::Context, worker: &Worker) {
         let Some(logs) = &self.logs else { return };
-        let reply = egui::Modal::new(egui::Id::new("rule_logs")).show(ctx, |ui| {
+        let reply = Theme::modal(ctx, egui::Id::new("rule_logs")).show(ctx, |ui| {
             ui.set_width(ctx.content_rect().width().min(740.0) - 48.0);
             ui.heading("脚本控制台");
             egui::ScrollArea::vertical()

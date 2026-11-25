@@ -1,5 +1,6 @@
 use crate::body::TextRows;
 use crate::rules_ui::{finished, label};
+use crate::theme::Theme;
 use crate::worker::{RequestHandle, Worker};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use eframe::egui;
@@ -562,7 +563,7 @@ impl LibraryUi {
     fn edit_dialog(&mut self, ctx: &egui::Context, worker: &Worker) {
         let Some(editor) = &mut self.edit else { return };
         let busy = self.reply.is_some();
-        let reply = egui::Modal::new(egui::Id::new("edit_library")).show(ctx, |ui| {
+        let reply = Theme::modal(ctx, egui::Id::new("edit_library")).show(ctx, |ui| {
             ui.set_min_width(320.0);
             let valid = match editor {
                 Edit::Bookmark { name, folder, .. } => {

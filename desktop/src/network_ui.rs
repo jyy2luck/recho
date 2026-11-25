@@ -1,5 +1,5 @@
 use crate::rules_ui::{finished, label};
-use crate::theme::Palette;
+use crate::theme::{Palette, Theme};
 use crate::worker::{PortChange, PortHandle, RequestHandle, Worker};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -43,109 +43,104 @@ impl PortDialog {
         let width = (ctx.content_rect().width() - 60.0).clamp(320.0, 460.0);
         let enabled = self.pending.is_none();
         let mut change = None;
-        let frame = egui::Frame::window(&ctx.global_style())
-            .fill(colors.side)
-            .inner_margin(egui::Margin::same(16));
-        let modal = egui::Modal::new(egui::Id::new("proxy_port_dialog"))
-            .frame(frame)
-            .show(ctx, |ui| {
-                ui.set_width(width);
-                ui.vertical_centered(|ui| {
-                    ui.heading("修改端口号");
-                });
-                ui.add_space(8.0);
-                egui::Frame::new()
-                    .fill(colors.bg)
-                    .stroke(egui::Stroke::new(1.0, colors.line))
-                    .corner_radius(4)
-                    .inner_margin(egui::Margin::symmetric(12, 18))
-                    .show(ui, |ui| {
-                        ui.add_enabled_ui(enabled, |ui| {
-                            ui.visuals_mut().widgets.inactive.bg_stroke =
-                                egui::Stroke::new(1.0, colors.line);
-                            ui.horizontal(|ui| {
-                                ui.add_space(((ui.available_width() - 120.0) * 0.5).max(0.0));
-                                let input = ui.add(
-                                    egui::TextEdit::singleline(&mut self.port)
-                                        .font(egui::FontId::proportional(26.0))
-                                        .horizontal_align(egui::Align::Center)
-                                        .vertical_align(egui::Align::Center)
-                                        .desired_width(120.0)
-                                        .min_size(egui::vec2(120.0, 48.0))
-                                        .hint_text("端口"),
-                                );
-                                if input.changed() {
-                                    self.error = None;
-                                }
-                                let refresh = ui.add(
-                                    egui::Button::new(crate::workbench::icon("\u{e5d5}"))
-                                        .min_size(egui::vec2(32.0, 32.0))
-                                        .frame_when_inactive(false),
-                                );
-                                refresh.widget_info(|| {
-                                    egui::WidgetInfo::labeled(
-                                        egui::WidgetType::Button,
-                                        enabled,
-                                        "换一个可用端口",
-                                    )
+        let modal = Theme::modal(ctx, egui::Id::new("proxy_port_dialog")).show(ctx, |ui| {
+            ui.set_width(width);
+            ui.vertical_centered(|ui| {
+                ui.heading("修改端口号");
+            });
+            ui.add_space(8.0);
+            egui::Frame::new()
+                .fill(colors.bg)
+                .stroke(egui::Stroke::new(1.0, colors.line))
+                .corner_radius(4)
+                .inner_margin(egui::Margin::symmetric(12, 18))
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(enabled, |ui| {
+                        ui.visuals_mut().widgets.inactive.bg_stroke =
+                            egui::Stroke::new(1.0, colors.line);
+                        ui.horizontal(|ui| {
+                            ui.add_space(((ui.available_width() - 120.0) * 0.5).max(0.0));
+                            let input = ui.add(
+                                egui::TextEdit::singleline(&mut self.port)
+                                    .font(egui::FontId::proportional(26.0))
+                                    .horizontal_align(egui::Align::Center)
+                                    .vertical_align(egui::Align::Center)
+                                    .desired_width(120.0)
+                                    .min_size(egui::vec2(120.0, 48.0))
+                                    .hint_text("端口"),
+                            );
+                            if input.changed() {
+                                self.error = None;
+                            }
+                            let refresh = ui.add(
+                                egui::Button::new(crate::workbench::icon("\u{e5d5}"))
+                                    .min_size(egui::vec2(32.0, 32.0))
+                                    .frame_when_inactive(false),
+                            );
+                            refresh.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    enabled,
+                                    "换一个可用端口",
+                                )
+                            });
+                            if refresh.on_hover_text("换一个可用端口").clicked() {
+                                change = Some(PortChange::Suggest(
+                                    self.port.trim().parse().unwrap_or(current_port),
+                                ));
+                            }
+                        });
+                        ui.add_space(16.0);
+                        ui.columns(6, |columns| {
+                            for (ui, port) in columns
+                                .iter_mut()
+                                .zip(["8000", "8080", "8888", "9000", "9090", "9999"])
+                            {
+                                ui.vertical_centered(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::selectable(self.port == port, port)
+                                                .min_size(egui::vec2(43.0, 26.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.port = port.into();
+                                        self.error = None;
+                                    }
                                 });
-                                if refresh.on_hover_text("换一个可用端口").clicked() {
-                                    change = Some(PortChange::Suggest(
-                                        self.port.trim().parse().unwrap_or(current_port),
-                                    ));
-                                }
-                            });
-                            ui.add_space(16.0);
-                            ui.columns(6, |columns| {
-                                for (ui, port) in columns
-                                    .iter_mut()
-                                    .zip(["8000", "8080", "8888", "9000", "9090", "9999"])
-                                {
-                                    ui.vertical_centered(|ui| {
-                                        if ui
-                                            .add(
-                                                egui::Button::selectable(self.port == port, port)
-                                                    .min_size(egui::vec2(43.0, 26.0)),
-                                            )
-                                            .clicked()
-                                        {
-                                            self.port = port.into();
-                                            self.error = None;
-                                        }
-                                    });
-                                }
-                            });
+                            }
                         });
                     });
-                ui.add_space(6.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add_enabled(
-                            enabled,
-                            egui::Button::new(egui::RichText::new("完成").color(colors.accent))
-                                .min_size(egui::vec2(60.0, 30.0))
-                                .frame_when_inactive(false),
-                        )
-                        .clicked()
-                    {
-                        match self.port.trim().parse::<u16>() {
-                            Ok(port) => change = Some(PortChange::Apply(port)),
-                            Err(_) => self.error = Some("端口必须是 0–65535".into()),
-                        }
+                });
+            ui.add_space(6.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(egui::RichText::new("完成").color(colors.accent))
+                            .min_size(egui::vec2(60.0, 30.0))
+                            .frame_when_inactive(false),
+                    )
+                    .clicked()
+                {
+                    match self.port.trim().parse::<u16>() {
+                        Ok(port) => change = Some(PortChange::Apply(port)),
+                        Err(_) => self.error = Some("端口必须是 0–65535".into()),
                     }
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        if let Some(error) = &self.error {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(error).color(colors.red))
-                                    .truncate(),
-                            )
-                            .on_hover_text(error);
-                        } else if !enabled {
-                            ui.spinner();
-                        }
-                    });
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if let Some(error) = &self.error {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(error).color(colors.red))
+                                .truncate(),
+                        )
+                        .on_hover_text(error);
+                    } else if !enabled {
+                        ui.spinner();
+                    }
                 });
             });
+        });
         if let Some(change) = change {
             self.error = None;
             match worker.edit_port(change) {
@@ -617,7 +612,7 @@ impl NetworkUi {
         let mut save = false;
         let mut refresh = false;
         if let Some(edit) = &mut self.edit {
-            let response = egui::Modal::new(egui::Id::new("network_editor")).show(ctx, |ui| {
+            let response = Theme::modal(ctx, egui::Id::new("network_editor")).show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 50.0).min(680.0));
                 ui.heading(format!("编辑{}", edit.section.label()));
                 egui::ScrollArea::vertical()
@@ -689,7 +684,7 @@ impl NetworkUi {
         }
         if let Some(entry) = &self.delete {
             let result =
-                egui::Modal::new(egui::Id::new("delete_network_profile")).show(ctx, |ui| {
+                Theme::modal(ctx, egui::Id::new("delete_network_profile")).show(ctx, |ui| {
                     ui.heading("删除配置");
                     ui.label(format!("确定删除「{}」？", label(&entry["name"])));
                     ui.horizontal(|ui| {

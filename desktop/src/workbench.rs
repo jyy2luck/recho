@@ -1,5 +1,6 @@
 use super::*;
 use crate::certificate_ui::Page as CertificatePage;
+use crate::theme::Theme;
 use egui_extras::{Column, TableBuilder};
 
 const NEW_HTTP: egui::KeyboardShortcut =
@@ -847,12 +848,14 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(14, 8))
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
+            let size = egui::vec2(ui.available_width(), 34.0);
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.allocate_ui_with_layout(size, layout, |ui| {
                 let address_ready = app.ready && app.port != 0;
                 let text = if address_ready {
-                    format!("●  Proxying on {}", app.proxy_address())
+                    format!("代理地址  {}", app.proxy_address())
                 } else {
-                    "正在启动引擎…".into()
+                    "启动中…".into()
                 };
                 let stop_width = 75.0;
                 let clear_width = 33.0;
@@ -865,13 +868,28 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                 let address_width = ui.available_width() - stop_width - clear_width - 2.0 * gap;
                 let address_height = address
                     .show(ui, |ui| {
-                        ui.set_width((address_width - address.total_margin().sum().x).max(120.0));
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(text).color(if app.running {
+                        let width = (address_width - address.total_margin().sum().x).max(120.0);
+                        ui.allocate_ui_with_layout(egui::vec2(width, 28.0), layout, |ui| {
+                            let status = if address_ready && app.running {
                                 colors.green
                             } else {
                                 colors.muted
-                            }));
+                            };
+                            let (dot, painter) =
+                                ui.allocate_painter(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                            painter.circle_filled(dot.rect.center(), 3.0, status);
+                            let text_width = (ui.available_width() - 4.0 * (28.0 + gap)).max(0.0);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(text_width, 28.0),
+                                layout,
+                                |ui| {
+                                    let label = ui.add(
+                                        egui::Label::new(RichText::new(&text).color(status))
+                                            .truncate(),
+                                    );
+                                    label.on_hover_text(&text);
+                                },
+                            );
                             let edit = ui.add_enabled(
                                 address_ready,
                                 egui::Button::new(icon("\u{e3c9}"))
@@ -904,10 +922,22 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                         "启用系统代理"
                                     };
                                     let enabled = app.ready && (app.running || pending);
+                                    let button = egui::Button::selectable(
+                                        active,
+                                        if active {
+                                            icon("\u{e894}").color(colors.bg)
+                                        } else {
+                                            icon("\u{e894}")
+                                        },
+                                    )
+                                    .min_size(egui::vec2(28.0, 28.0));
                                     let proxy = ui.add_enabled(
                                         enabled,
-                                        egui::Button::selectable(active, icon("\u{e894}"))
-                                            .min_size(egui::vec2(28.0, 28.0)),
+                                        if active {
+                                            button.fill(colors.accent)
+                                        } else {
+                                            button
+                                        },
                                     );
                                     proxy.widget_info(|| {
                                         egui::WidgetInfo::selected(
@@ -1990,7 +2020,7 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
         app.ready,
     );
     if app.confirm_proxy_auto {
-        let modal = egui::Modal::new(egui::Id::new("proxy_auto_confirmation")).show(ctx, |ui| {
+        let modal = Theme::modal(ctx, egui::Id::new("proxy_auto_confirmation")).show(ctx, |ui| {
             ui.set_width(400.0);
             ui.heading("随调试启动启用系统代理");
             ui.label("下次启动 recho 或恢复调试时，recho 会将选中的协议指向本机监听端口。暂停、退出或手动恢复时会恢复原设置。");

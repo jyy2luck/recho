@@ -1,4 +1,5 @@
 use super::{RequestHandle, Value, Worker, egui, finished, json, label};
+use crate::theme::Theme;
 use recho_core::native::parse_header_lines;
 use std::fmt::Write as _;
 
@@ -72,7 +73,7 @@ impl Breakpoint {
         let mut action = None;
         let waiting = self.action.is_some();
         let reply =
-            egui::Modal::new(egui::Id::new("paused_message").with(&self.id)).show(ctx, |ui| {
+            Theme::modal(ctx, egui::Id::new("paused_message").with(&self.id)).show(ctx, |ui| {
                 ui.set_width((ctx.content_rect().width() - 60.0).min(740.0));
                 ui.heading(title(&self.summary));
                 ui.add(
