@@ -1936,12 +1936,17 @@ fn details(app: &mut Recho, ui: &mut egui::Ui) {
         });
     });
     ui.separator();
-    let height = ui.available_height() * 0.48;
+    let height = ui.available_height();
+    let minimum = 120.0_f32.min(height / 2.0);
     egui::Panel::top("request")
-        .default_size(height)
-        .min_size(120.0)
+        .default_size(height * 0.48)
+        .min_size(minimum)
+        .max_size(height - minimum)
         .resizable(true)
-        .show(ui, |ui| message(app, ui, 0));
+        .show(ui, |ui| {
+            ui.take_available_space();
+            message(app, ui, 0);
+        });
     message(app, ui, 1);
 }
 fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
@@ -2036,19 +2041,25 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
     }
     ui.separator();
     if panel.tab == MessageTab::Overview {
-        for (key, value) in [
-            ("方法", row.method.clone()),
-            ("协议", row.protocol.clone()),
-            ("应用程序", row.application.clone()),
-            ("服务器 IP", row.server_ip.clone()),
-            ("状态", row.status.to_string()),
-            ("URL", row.url.clone()),
-        ] {
-            ui.horizontal(|ui| {
-                ui.add_sized([85.0, 20.0], egui::Label::new(RichText::new(key).weak()));
-                ui.add(egui::Label::new(value).wrap());
+        egui::ScrollArea::vertical()
+            .id_salt("request_overview")
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (key, value) in [
+                    ("方法", row.method.as_str()),
+                    ("协议", row.protocol.as_str()),
+                    ("应用程序", row.application.as_str()),
+                    ("服务器 IP", row.server_ip.as_str()),
+                    ("状态", &row.status.to_string()),
+                    ("URL", row.url.as_str()),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([85.0, 20.0], egui::Label::new(RichText::new(key).weak()));
+                        ui.add(egui::Label::new(value).wrap());
+                    });
+                }
             });
-        }
         return;
     }
     let Some(viewer) = &mut panel.viewer else {
@@ -2058,6 +2069,7 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
     if panel.tab == MessageTab::Headers {
         egui::ScrollArea::both()
             .id_salt(("headers", index))
+            .min_scrolled_height(0.0)
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new(("header_grid", index))
@@ -2178,6 +2190,7 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
     };
     egui::ScrollArea::both()
         .id_salt(("body", index, &viewer.detail.id, hex))
+        .min_scrolled_height(0.0)
         .auto_shrink([false, false])
         .show_rows(ui, row_height, count, |ui, range| {
             if hex {
