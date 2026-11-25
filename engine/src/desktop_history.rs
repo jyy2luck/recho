@@ -18,18 +18,28 @@ pub struct CaptureBatch {
 pub struct HistoryDay {
     pub date: String,
     pub total: usize,
-    pub archived: usize,
 }
 
 pub struct HistoryPage {
     pub rows: Vec<Row>,
-    pub archived: BTreeSet<String>,
     pub days: Vec<HistoryDay>,
 }
 
 pub enum HistoryDeletion {
     Selected(Vec<String>),
-    Day { date: String, count: usize },
+    Dates(Vec<String>),
+}
+
+pub struct HistoryDeletePlan {
+    pub dates: Vec<String>,
+    pub active: usize,
+    ids: Vec<String>,
+}
+
+impl HistoryDeletePlan {
+    pub fn count(&self) -> usize {
+        self.ids.len()
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -225,71 +235,71 @@ impl History {
         let days = self
             .db
             .prepare(
-                "SELECT date(started_at, 'localtime') AS day, count(*), sum(archived) FROM sessions
+                "SELECT date(started_at, 'localtime') AS day, count(*) FROM sessions
              WHERE day IS NOT NULL GROUP BY day ORDER BY day DESC",
             )?
             .query_map([], |row| {
                 Ok(HistoryDay {
                     date: row.get(0)?,
                     total: row.get(1)?,
-                    archived: row.get(2)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
         let mut statement = self.db.prepare(
-            "SELECT document, archived FROM sessions
+            "SELECT document FROM sessions
              WHERE (?1 IS NULL OR date(started_at, 'localtime') = ?1)
              AND (?2 = '' OR instr(lower(document), lower(?2)) > 0)
              ORDER BY started_at DESC, rowid DESC LIMIT 100 OFFSET ?3",
         )?;
         let mut result = statement.query(params![date, query, offset as i64])?;
         let mut rows = Vec::new();
-        let mut archived = BTreeSet::new();
         while let Some(record) = result.next()? {
             let document = record
                 .get_ref(0)?
                 .as_str()
                 .map_err(crate::wire::Error::bad)?;
-            let row = Row::from(&serde_json::from_str::<Session>(document)?);
-            if record.get::<_, bool>(1)? {
-                archived.insert(row.id.clone());
-            }
-            rows.push(row);
+            rows.push(Row::from(&serde_json::from_str::<Session>(document)?));
         }
-        Ok(HistoryPage {
-            rows,
-            archived,
-            days,
-        })
+        Ok(HistoryPage { rows, days })
     }
 
-    pub(crate) fn delete_archived(&mut self, target: HistoryDeletion) -> Result<usize> {
-        let ids = match target {
-            HistoryDeletion::Selected(ids) => {
-                for id in &ids {
-                    if self.is_archived(id)? != Some(true) {
-                        return Err(crate::wire::Error::bad("只能删除已归档的捕获记录"));
-                    }
-                }
-                ids
-            }
-            HistoryDeletion::Day { date, count } => {
-                let ids = self.db.prepare(
-                    "SELECT id FROM sessions WHERE archived = 1 AND date(started_at, 'localtime') = ?"
-                )?.query_map([date], |row| row.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
-                if ids.len() != count {
-                    return Err(crate::wire::Error::bad(
-                        "当天已归档记录已变化，请刷新后重试",
-                    ));
-                }
-                ids
-            }
+    pub(crate) fn prepare_history_delete(
+        &self,
+        target: HistoryDeletion,
+    ) -> Result<HistoryDeletePlan> {
+        let (field, parameters) = match &target {
+            HistoryDeletion::Selected(ids) => ("id", ids),
+            HistoryDeletion::Dates(dates) => ("date(started_at, 'localtime')", dates),
         };
-        let count = ids.len();
-        for id in ids {
-            self.delete(&id)?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT id, archived FROM sessions WHERE {field} IN (SELECT value FROM json_each(?1))"
+        ))?;
+        let mut rows = statement.query([serde_json::to_string(parameters)?])?;
+        let mut ids = Vec::new();
+        let mut active = 0;
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+            active += usize::from(!row.get::<_, bool>(1)?);
         }
-        Ok(count)
+        if ids.is_empty() {
+            return Err(crate::wire::Error::bad("所选范围已没有可删除的历史记录"));
+        }
+        let dates = match target {
+            HistoryDeletion::Dates(dates) => dates,
+            HistoryDeletion::Selected(_) => Vec::new(),
+        };
+        Ok(HistoryDeletePlan { dates, active, ids })
+    }
+
+    pub(crate) fn delete_history(&mut self, plan: HistoryDeletePlan) -> Result<usize> {
+        let mut deleted = 0;
+        for id in plan.ids {
+            if self.is_archived(&id)?.is_some() {
+                self.delete(&id)?;
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
     }
 }
 
@@ -309,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_retains_a_full_round_and_deletes_only_archived_records() {
+    fn desktop_retains_a_full_round_and_deletes_the_confirmed_history_scope() {
         let dir = tempfile::tempdir().unwrap();
         let mut history = History::open(dir.path(), 200).unwrap();
         history.enable_desktop_captures().unwrap();
@@ -336,11 +346,13 @@ mod tests {
         assert_eq!(initial.rows.len(), 207);
         assert_eq!(initial.rows["oldest"].status, 200);
         assert!(initial.rows["private"].incognito);
-        assert!(
-            history
-                .delete_archived(HistoryDeletion::Selected(vec![oldest.id.clone()]))
-                .is_err()
-        );
+        let selected = history
+            .prepare_history_delete(HistoryDeletion::Selected(vec![
+                oldest.id.clone(),
+                private.id.clone(),
+            ]))
+            .unwrap();
+        assert_eq!((selected.count(), selected.active), (1, 1));
         assert_eq!(history.archive_captures("default", None).unwrap(), (206, 1));
         assert!(
             history
@@ -383,23 +395,33 @@ mod tests {
         let days = reopened.desktop_history_page(None, 0, "").unwrap().days;
         assert_eq!(days.len(), 1);
         let day = &days[0];
-        assert_eq!((day.total, day.archived), (207, 206));
+        assert_eq!(day.total, 207);
         let filtered = reopened
             .desktop_history_page(Some(&day.date), 0, "/oldest")
             .unwrap();
-        assert!(filtered.archived.contains(&oldest.id));
         assert_eq!(filtered.rows.len(), 1);
-        assert_eq!(
-            reopened
-                .delete_archived(HistoryDeletion::Day {
-                    date: day.date.clone(),
-                    count: 206
-                })
-                .unwrap(),
-            206
-        );
+        let first_plan = reopened
+            .prepare_history_delete(HistoryDeletion::Selected(vec![other.id.clone()]))
+            .unwrap();
+        assert_eq!((first_plan.count(), first_plan.active), (1, 1));
+        assert_eq!(reopened.delete_history(first_plan).unwrap(), 1);
+        assert!(reopened.get(&other.id).unwrap().is_none());
+        let additional_day = capture("second-day", "other-tab", "2026-11-26T12:00:00.000Z");
+        reopened.insert(&additional_day);
+        let days = reopened.desktop_history_page(None, 0, "").unwrap().days;
+        assert_eq!(days.len(), 2);
+        let plan = reopened
+            .prepare_history_delete(HistoryDeletion::Dates(
+                days.into_iter().map(|day| day.date).collect(),
+            ))
+            .unwrap();
+        assert_eq!((plan.count(), plan.active), (207, 1));
+        let late = capture("after-confirmation-opened", "default", time);
+        reopened.insert(&late);
+        assert_eq!(reopened.delete_history(plan).unwrap(), 207);
         assert!(!reopened.body_path(&oldest.id, "response").exists());
-        assert!(reopened.get(&other.id).unwrap().is_some());
+        assert!(reopened.get(&additional_day.id).unwrap().is_none());
+        assert!(reopened.get(&late.id).unwrap().is_some());
     }
 
     #[test]
@@ -432,9 +454,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["active"]
         );
-        assert_eq!(
-            history.desktop_history_page(None, 0, "").unwrap().archived,
-            ["cleared".into(), "removed".into(), "closed-tab".into()].into()
-        );
+        for id in ["cleared", "removed", "closed-tab"] {
+            assert_eq!(history.is_archived(id).unwrap(), Some(true));
+        }
     }
 }

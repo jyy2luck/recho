@@ -8,7 +8,9 @@ mod har;
 pub use crate::certificates::PublicCertificate;
 pub use crate::identity::CERTIFICATE_DOWNLOAD_URL;
 pub use crate::local_network::proxy_addresses;
-pub use crate::storage::desktop_history::{CaptureBatch, HistoryDay, HistoryDeletion, HistoryPage};
+pub use crate::storage::desktop_history::{
+    CaptureBatch, HistoryDay, HistoryDeletePlan, HistoryDeletion, HistoryPage,
+};
 pub use capture_conditions::{CaptureMatches, Condition, ConditionSet, Field, Operator};
 
 pub fn write_local_file(path: &std::path::Path, bytes: &[u8]) -> std::result::Result<(), String> {
@@ -326,13 +328,26 @@ impl DesktopEngine {
             .map_err(|error| error.to_string())
     }
 
-    pub fn delete_archived(&self, target: HistoryDeletion) -> std::result::Result<usize, String> {
+    pub fn prepare_history_delete(
+        &self,
+        target: HistoryDeletion,
+    ) -> std::result::Result<HistoryDeletePlan, String> {
         self.running
             .engine
             .history
             .lock()
             .unwrap()
-            .delete_archived(target)
+            .prepare_history_delete(target)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn delete_history(&self, plan: HistoryDeletePlan) -> std::result::Result<usize, String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .delete_history(plan)
             .map_err(|error| error.to_string())
     }
 

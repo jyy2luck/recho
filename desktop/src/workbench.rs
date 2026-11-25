@@ -744,31 +744,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
             return;
         }
         Navigation::History => {
-            ui.strong("历史");
-            let mut date = app.history_date.clone();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if sidebar_row(ui, "全部日期", Some(date.is_none())).clicked() {
-                        date = None;
-                    }
-                    for day in &app.history_days {
-                        if sidebar_row(
-                            ui,
-                            format!("{}  ({})", day.date, day.total),
-                            Some(date.as_ref() == Some(&day.date)),
-                        )
-                        .clicked()
-                        {
-                            date = Some(day.date.clone());
-                        }
-                    }
-                });
-            if date != app.history_date {
-                app.history_date = date;
-                app.select(None);
-                app.load_history(0);
-            }
+            history_sidebar(app, ui);
             return;
         }
         _ => {}
@@ -1263,14 +1239,144 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
     }
 }
 
+fn select_all_pressed(input: &mut egui::InputState) -> bool {
+    input.consume_key(egui::Modifiers::COMMAND, egui::Key::A)
+        || input.consume_key(egui::Modifiers::CTRL, egui::Key::A)
+}
+
+fn history_sidebar(app: &mut Recho, ui: &mut egui::Ui) {
+    let focus_id = ui.make_persistent_id("history_dates_focus");
+    ui.interact(
+        egui::Rect::NOTHING,
+        focus_id,
+        egui::Sense::focusable_noninteractive(),
+    );
+    let delete_enabled = !app.history_delete_pending && app.history_delete.is_none();
+    if delete_enabled
+        && ui.memory(|memory| memory.has_focus(focus_id))
+        && ui.input_mut(select_all_pressed)
+    {
+        app.history_selected_dates = app
+            .history_days
+            .iter()
+            .map(|day| day.date.clone())
+            .collect();
+        if app.history_date_anchor.is_none() {
+            app.history_date_anchor = app.history_days.first().map(|day| day.date.clone());
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.strong("历史");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(
+                    delete_enabled && !app.history_selected_dates.is_empty(),
+                    egui::Button::new("删除所选"),
+                )
+                .clicked()
+            {
+                app.prepare_history_delete(HistoryDeletion::Dates(
+                    app.history_selected_dates.iter().cloned().collect(),
+                ));
+            }
+        });
+    });
+    let mut date = app.history_date.clone();
+    let mut delete_day = None;
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let all_selected = date.is_none() && app.history_selected_dates.is_empty();
+            if sidebar_row(ui, "全部日期", Some(all_selected)).clicked() {
+                ui.memory_mut(|memory| memory.request_focus(focus_id));
+                date = None;
+                app.history_selected_dates.clear();
+                app.history_date_anchor = None;
+            }
+            for day in &app.history_days {
+                ui.push_id(&day.date, |ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let delete = ui.add_enabled(
+                            delete_enabled,
+                            egui::Button::new(icon("\u{e92e}").size(16.0))
+                                .frame_when_inactive(false),
+                        );
+                        delete.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Button,
+                                delete_enabled,
+                                format!("删除 {}", day.date),
+                            )
+                        });
+                        if delete.on_hover_text("删除这一天").clicked() {
+                            delete_day = Some(day.date.clone());
+                        }
+                        let selected = app.history_selected_dates.contains(&day.date);
+                        if sidebar_row(ui, format!("{}  ({})", day.date, day.total), Some(selected))
+                            .clicked()
+                        {
+                            ui.memory_mut(|memory| memory.request_focus(focus_id));
+                            let modifiers = ui.input(|input| input.modifiers);
+                            let order = if modifiers.shift {
+                                app.history_days
+                                    .iter()
+                                    .map(|day| day.date.as_str())
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            select_list_item(
+                                &mut app.history_selected_dates,
+                                &mut app.history_date_anchor,
+                                &day.date,
+                                modifiers,
+                                &order,
+                            );
+                            if !modifiers.command && !modifiers.ctrl && !modifiers.shift {
+                                date = Some(day.date.clone());
+                            }
+                        }
+                    });
+                });
+            }
+        });
+    if let Some(day) = delete_day {
+        app.prepare_history_delete(HistoryDeletion::Dates(vec![day]));
+    }
+    if date != app.history_date {
+        app.history_date = date;
+        app.select(None);
+        app.load_history(0);
+    }
+}
+
 fn history(app: &mut Recho, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.strong("历史");
+        let search_width = (ui.available_width() - 235.0).clamp(75.0, 260.0);
         if ui
-            .add(egui::TextEdit::singleline(&mut app.history_query).hint_text("搜索历史"))
+            .add(
+                egui::TextEdit::singleline(&mut app.history_query)
+                    .hint_text("搜索历史")
+                    .desired_width(search_width),
+            )
             .changed()
         {
+            app.select(None);
             app.load_history(0);
+        }
+        if ui
+            .add_enabled(
+                !app.selection.is_empty()
+                    && !app.history_delete_pending
+                    && app.history_delete.is_none(),
+                egui::Button::new("删除所选"),
+            )
+            .clicked()
+        {
+            app.prepare_history_delete(HistoryDeletion::Selected(
+                app.selection.iter().cloned().collect(),
+            ));
         }
         if ui.button("刷新").clicked() {
             app.load_history(app.history_offset);
@@ -1279,48 +1385,21 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
             .add_enabled(app.history_offset > 0, egui::Button::new("上一页"))
             .clicked()
         {
+            app.select(None);
             app.load_history(app.history_offset.saturating_sub(100));
         }
         if ui
             .add_enabled(app.history_rows.len() == 100, egui::Button::new("下一页"))
             .clicked()
         {
+            app.select(None);
             app.load_history(app.history_offset + 100);
         }
         ui.weak(format!("第 {} 页", app.history_offset / 100 + 1));
     });
-    ui.horizontal(|ui| {
-        let loaded = app.history_load.is_none();
-        let selected = !app.selection.is_empty() && app.selection.is_subset(&app.history_archived);
-        if ui
-            .add_enabled(loaded && selected, egui::Button::new("删除所选"))
-            .on_disabled_hover_text("只能永久删除已归档的记录")
-            .clicked()
-        {
-            app.history_delete = Some(HistoryDeletion::Selected(
-                app.selection.iter().cloned().collect(),
-            ));
-        }
-        if let Some(day) = app
-            .history_days
-            .iter()
-            .find(|day| Some(&day.date) == app.history_date.as_ref())
-            && ui
-                .add_enabled(
-                    loaded && day.archived > 0,
-                    egui::Button::new("删除当天已归档记录"),
-                )
-                .on_disabled_hover_text("当天没有可删除的归档记录")
-                .clicked()
-        {
-            app.history_delete = Some(HistoryDeletion::Day {
-                date: day.date.clone(),
-                count: day.archived,
-            });
-        }
-    });
     if app.history_load.is_some() {
         ui.spinner();
+        return;
     } else if app.history_rows.is_empty() {
         ui.label(if app.history_loaded {
             "没有匹配的历史记录"
@@ -1384,6 +1463,12 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     });
     let mut scroll_to = None;
     if ui.memory(|memory| memory.has_focus(focus_id)) {
+        if history && app.history_delete.is_none() && ui.input_mut(select_all_pressed) {
+            app.selection = app.history_rows.iter().map(|row| row.id.clone()).collect();
+            if app.selection_anchor.is_none() {
+                app.selection_anchor = app.history_rows.first().map(|row| row.id.clone());
+            }
+        }
         let movement = ui.input_mut(|input| {
             input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) as isize
                 - input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as isize
@@ -1595,7 +1680,11 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         if response.secondary_clicked() && !app.selection.contains(&row.id) {
                             choose = Some((row.id.clone(), egui::Modifiers::NONE));
                         }
-                        if response.double_clicked() {
+                        if response.double_clicked()
+                            && !modifiers.command
+                            && !modifiers.ctrl
+                            && !modifiers.shift
+                        {
                             choose = Some((row.id.clone(), egui::Modifiers::NONE));
                             open = true;
                         }
@@ -1746,7 +1835,7 @@ fn moved_index(len: usize, current: Option<usize>, step: isize) -> Option<usize>
 
 #[cfg(test)]
 mod selection_tests {
-    use super::{clear_capture_pressed, egui, moved_index};
+    use super::{clear_capture_pressed, egui, moved_index, select_list_item};
 
     #[test]
     fn capture_navigation_does_not_wrap_and_can_start_without_selection() {
@@ -1781,6 +1870,44 @@ mod selection_tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn list_selection_toggles_rows_and_extends_in_display_order() {
+        let order = ["newest", "second", "third", "oldest"];
+        let mut selected = std::collections::BTreeSet::new();
+        let mut anchor = None;
+        select_list_item(
+            &mut selected,
+            &mut anchor,
+            "newest",
+            egui::Modifiers::NONE,
+            &order,
+        );
+        select_list_item(
+            &mut selected,
+            &mut anchor,
+            "third",
+            egui::Modifiers::CTRL,
+            &order,
+        );
+        assert_eq!(selected, ["newest".into(), "third".into()].into());
+        select_list_item(
+            &mut selected,
+            &mut anchor,
+            "oldest",
+            egui::Modifiers::SHIFT,
+            &order,
+        );
+        assert_eq!(selected, ["oldest".into(), "third".into()].into());
+        select_list_item(
+            &mut selected,
+            &mut anchor,
+            "third",
+            egui::Modifiers::CTRL,
+            &order,
+        );
+        assert_eq!(selected, ["oldest".into()].into());
     }
 }
 
@@ -2181,23 +2308,27 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
             app.confirm_proxy_auto = false;
         }
     }
-    if let Some(target) = &app.history_delete {
+    if let Some(plan) = &app.history_delete {
         let modal = Theme::modal(ctx, egui::Id::new("delete_history")).show(ctx, |ui| {
             ui.heading("永久删除历史记录");
-            ui.label(match target {
-                HistoryDeletion::Selected(ids) => {
-                    format!("永久删除所选的 {} 条已归档记录及正文？", ids.len())
-                }
-                HistoryDeletion::Day { date, count } => {
-                    format!("永久删除 {date} 的全部 {count} 条已归档记录及正文？")
-                }
+            let count = plan.count();
+            ui.label(match plan.dates.as_slice() {
+                [] => format!("永久删除所选的 {count} 条记录及正文？"),
+                [date] => format!("永久删除 {date} 的全部 {count} 条记录及正文？"),
+                dates => format!(
+                    "永久删除所选 {} 天的全部 {count} 条记录及正文？",
+                    dates.len()
+                ),
             });
+            if plan.active > 0 {
+                ui.label(format!("其中 {} 条会同时从实时列表移除。", plan.active));
+            }
             ui.horizontal(|ui| (ui.button("永久删除").clicked(), ui.button("取消").clicked()))
                 .inner
         });
         if modal.inner.0 {
-            let target = app.history_delete.take().unwrap();
-            app.send(Command::DeleteHistory(target));
+            let plan = app.history_delete.take().unwrap();
+            app.confirm_history_delete(plan);
         } else if modal.inner.1 || modal.should_close() {
             app.history_delete = None;
         }

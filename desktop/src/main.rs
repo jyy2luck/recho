@@ -22,7 +22,7 @@ mod worker;
 
 use body::{Content, hex_row};
 use eframe::egui::{self, RichText};
-use recho_core::native::{Detail, HistoryDay, HistoryDeletion, Phase, Row};
+use recho_core::native::{Detail, HistoryDay, HistoryDeletePlan, HistoryDeletion, Phase, Row};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -202,8 +202,10 @@ struct Recho {
     history_rows: Vec<Row>,
     history_days: Vec<HistoryDay>,
     history_date: Option<String>,
-    history_archived: BTreeSet<String>,
-    history_delete: Option<HistoryDeletion>,
+    history_selected_dates: BTreeSet<String>,
+    history_date_anchor: Option<String>,
+    history_delete: Option<HistoryDeletePlan>,
+    history_delete_pending: bool,
     history_query: String,
     history_offset: usize,
     history_load: Option<HistoryHandle>,
@@ -311,8 +313,10 @@ impl Recho {
             history_rows: Vec::new(),
             history_days: Vec::new(),
             history_date: None,
-            history_archived: BTreeSet::new(),
+            history_selected_dates: BTreeSet::new(),
+            history_date_anchor: None,
             history_delete: None,
+            history_delete_pending: false,
             history_query: String::new(),
             history_offset: 0,
             history_load: None,
@@ -419,40 +423,26 @@ impl Recho {
         }
     }
     fn select_row(&mut self, id: String, modifiers: egui::Modifiers) {
-        if !modifiers.command && !modifiers.shift {
-            self.select(Some(id));
-            return;
-        }
-        if modifiers.shift {
-            let rows = workbench::visible_rows(
+        let order = if modifiers.shift {
+            workbench::visible_rows(
                 &self.rows,
                 &self.visible,
                 &self.history_rows,
                 self.navigation == Navigation::History,
-            );
-            let position = |id: &str| rows.iter().position(|row| row.id == id);
-            if let (Some(anchor), Some(end)) = (
-                self.selection_anchor.as_deref().and_then(position),
-                position(&id),
-            ) {
-                if !modifiers.command {
-                    self.selection.clear();
-                }
-                self.selection.extend(
-                    rows[anchor.min(end)..=anchor.max(end)]
-                        .iter()
-                        .map(|row| row.id.clone()),
-                );
-            } else {
-                self.selection.insert(id.clone());
-                self.selection_anchor = Some(id.clone());
-            }
+            )
+            .into_iter()
+            .map(|row| row.id.as_str())
+            .collect::<Vec<_>>()
         } else {
-            self.selection_anchor = Some(id.clone());
-            if !self.selection.remove(&id) {
-                self.selection.insert(id.clone());
-            }
-        }
+            Vec::new()
+        };
+        select_list_item(
+            &mut self.selection,
+            &mut self.selection_anchor,
+            &id,
+            modifiers,
+            &order,
+        );
         let detail = if self.selection.contains(&id) {
             Some(id)
         } else {
@@ -517,6 +507,22 @@ impl Recho {
                 self.history_offset = offset;
                 self.history_load = Some(request);
             }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn prepare_history_delete(&mut self, target: HistoryDeletion) {
+        if !self.history_delete_pending && self.history_delete.is_none() {
+            match self.worker.send(Command::PrepareHistoryDelete(target)) {
+                Ok(()) => self.history_delete_pending = true,
+                Err(error) => self.error = Some(error),
+            }
+        }
+    }
+
+    fn confirm_history_delete(&mut self, plan: HistoryDeletePlan) {
+        match self.worker.send(Command::DeleteHistory(plan)) {
+            Ok(()) => self.history_delete_pending = true,
             Err(error) => self.error = Some(error),
         }
     }
@@ -875,6 +881,19 @@ impl Recho {
             self.activate_capture(group);
             self.notice = Some(format!("已导入 {count} 条 HAR 记录"));
         }
+        if let Some(result) = inbox.history_delete_plan {
+            self.history_delete_pending = false;
+            match result {
+                Ok(plan) if self.navigation == Navigation::History => {
+                    self.history_delete = Some(plan)
+                }
+                Ok(_) => {}
+                Err(error) => self.error = Some(error),
+            }
+        }
+        if inbox.history_delete_finished {
+            self.history_delete_pending = false;
+        }
         if inbox.history_changed && self.navigation == Navigation::History {
             self.load_history(0);
         }
@@ -894,8 +913,9 @@ impl Recho {
                             .retain(|id| page.rows.iter().any(|row| &row.id == id));
                     }
                     self.history_rows = page.rows;
-                    self.history_archived = page.archived;
                     self.history_days = page.days;
+                    self.history_selected_dates
+                        .retain(|date| self.history_days.iter().any(|day| &day.date == date));
                     self.history_loaded = true;
                     self.history_load = None;
                     if self
@@ -920,6 +940,37 @@ impl Recho {
         }
     }
 }
+fn select_list_item(
+    selection: &mut BTreeSet<String>,
+    anchor: &mut Option<String>,
+    id: &str,
+    modifiers: egui::Modifiers,
+    order: &[&str],
+) {
+    let additive = modifiers.command || modifiers.ctrl;
+    if modifiers.shift {
+        let position = |id: &str| order.iter().position(|&item| item == id);
+        if let (Some(start), Some(end)) = (anchor.as_deref().and_then(position), position(id)) {
+            if !additive {
+                selection.clear();
+            }
+            selection.extend(
+                order[start.min(end)..=start.max(end)]
+                    .iter()
+                    .map(|&id| id.to_owned()),
+            );
+            return;
+        }
+    }
+    *anchor = Some(id.into());
+    if !additive {
+        selection.clear();
+    }
+    if !additive || modifiers.shift || !selection.remove(id) {
+        selection.insert(id.into());
+    }
+}
+
 impl eframe::App for Recho {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.receive();

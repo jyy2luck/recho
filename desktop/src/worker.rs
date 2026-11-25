@@ -1,7 +1,7 @@
 use eframe::egui;
 use recho_core::native::{
-    CaptureBatch, CaptureMatches, ConditionSet, DesktopEngine, Detail, HistoryDeletion,
-    HistoryPage, Phase, Snapshot,
+    CaptureBatch, CaptureMatches, ConditionSet, DesktopEngine, Detail, HistoryDeletePlan,
+    HistoryDeletion, HistoryPage, Phase, Snapshot,
 };
 use serde_json::Value;
 use std::{
@@ -44,7 +44,8 @@ pub enum Command {
         ids: Option<Vec<String>>,
         close: bool,
     },
-    DeleteHistory(HistoryDeletion),
+    PrepareHistoryDelete(HistoryDeletion),
+    DeleteHistory(HistoryDeletePlan),
     ImportHar(PathBuf),
     ExportHar(PathBuf, Vec<String>),
     MatchCaptures {
@@ -83,6 +84,8 @@ pub struct Inbox {
     pub captures: Option<CaptureBatch>,
     pub closed_captures: Vec<String>,
     pub history_changed: bool,
+    pub history_delete_plan: Option<Result<HistoryDeletePlan, String>>,
+    pub history_delete_finished: bool,
     pub details: [Option<(u64, Result<Detail, String>)>; 2],
     pub error: Option<String>,
     pub breakpoints: Option<Value>,
@@ -214,10 +217,16 @@ impl Worker {
                                         });
                                     });
                                 }),
-                                Command::DeleteHistory(target) => {
-                                    let result = engine.delete_archived(target);
+                                Command::PrepareHistoryDelete(target) => {
+                                    let mut result = Some(engine.prepare_history_delete(target));
+                                    publish(&mut |inbox| inbox.history_delete_plan = result.take());
+                                    Ok(())
+                                }
+                                Command::DeleteHistory(plan) => {
+                                    let result = engine.delete_history(plan);
                                     publish(&mut |inbox| {
                                         inbox.history_changed = true;
+                                        inbox.history_delete_finished = true;
                                         if let Ok(count) = &result {
                                             inbox.notice = Some(format!("已永久删除 {count} 条历史记录"));
                                         }
