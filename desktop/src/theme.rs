@@ -6,8 +6,11 @@ use std::path::Path;
 #[serde(rename_all = "kebab-case")]
 pub(super) enum ThemeColor {
     #[default]
+    Monochrome,
     Green,
     Blue,
+    Purple,
+    Berry,
     Orange,
 }
 
@@ -63,14 +66,107 @@ fn rgb(value: u32) -> Color32 {
 }
 
 impl ThemeColor {
-    pub(super) const OPTIONS: [(Self, &str); 3] = [
+    pub(super) const OPTIONS: [(Self, &str); 6] = [
+        (Self::Monochrome, "黑白"),
         (Self::Green, "绿"),
         (Self::Blue, "蓝"),
+        (Self::Purple, "紫色"),
+        (Self::Berry, "莓红"),
         (Self::Orange, "橙"),
     ];
 
     fn palette(self, appearance: egui::Theme) -> Palette {
         match (self, appearance) {
+            (Self::Monochrome, egui::Theme::Dark) => Palette {
+                bg: rgb(0x121212),
+                side: rgb(0x191919),
+                chrome: rgb(0x212121),
+                code: rgb(0x1c1c1c),
+                line: rgb(0x383838),
+                text: rgb(0xe8e8e8),
+                muted: rgb(0xb5b5b5),
+                accent: rgb(0xf9f9f9),
+                selected: rgb(0x323232),
+                green: rgb(0x98d8ae),
+                red: rgb(0xff9498),
+                warning: rgb(0xeac681),
+                key: rgb(0xadcbf5),
+            },
+            (Self::Monochrome, egui::Theme::Light) => Palette {
+                bg: rgb(0xfcfcfc),
+                side: rgb(0xf4f4f4),
+                chrome: rgb(0xeeeeee),
+                code: rgb(0xf7f7f7),
+                line: rgb(0xd5d5d5),
+                text: rgb(0x262626),
+                muted: rgb(0x575757),
+                accent: rgb(0x121212),
+                selected: rgb(0xe2e2e2),
+                green: rgb(0x216648),
+                red: rgb(0xa52c37),
+                warning: rgb(0x795100),
+                key: rgb(0x31578b),
+            },
+            (Self::Purple, egui::Theme::Dark) => Palette {
+                bg: rgb(0x191620),
+                side: rgb(0x211c2a),
+                chrome: rgb(0x261f31),
+                code: rgb(0x241d2e),
+                line: rgb(0x3f354f),
+                text: rgb(0xf1edf8),
+                muted: rgb(0xbfb4cf),
+                accent: rgb(0xc7b4f2),
+                selected: rgb(0x392c53),
+                green: rgb(0x98d8ae),
+                red: rgb(0xff9498),
+                warning: rgb(0xeac681),
+                key: rgb(0xadcbf5),
+            },
+            (Self::Purple, egui::Theme::Light) => Palette {
+                bg: rgb(0xfbfafe),
+                side: rgb(0xf5f2fa),
+                chrome: rgb(0xeeecf7),
+                code: rgb(0xf3f0f9),
+                line: rgb(0xdad2e7),
+                text: rgb(0x2a2237),
+                muted: rgb(0x5f546d),
+                accent: rgb(0x6542a4),
+                selected: rgb(0xe7ddf5),
+                green: rgb(0x216648),
+                red: rgb(0xa52c37),
+                warning: rgb(0x795100),
+                key: rgb(0x31578b),
+            },
+            (Self::Berry, egui::Theme::Dark) => Palette {
+                bg: rgb(0x1d1518),
+                side: rgb(0x251a1f),
+                chrome: rgb(0x2b1e24),
+                code: rgb(0x291d22),
+                line: rgb(0x4b343f),
+                text: rgb(0xf8edf0),
+                muted: rgb(0xcbb6be),
+                accent: rgb(0xe8a4ba),
+                selected: rgb(0x452b36),
+                green: rgb(0x98d8ae),
+                red: rgb(0xff9498),
+                warning: rgb(0xeac681),
+                key: rgb(0xadcbf5),
+            },
+            (Self::Berry, egui::Theme::Light) => Palette {
+                bg: rgb(0xfdf9fa),
+                side: rgb(0xf8f0f3),
+                chrome: rgb(0xf2e8ec),
+                code: rgb(0xf8eef1),
+                line: rgb(0xe1cfd6),
+                text: rgb(0x33232b),
+                muted: rgb(0x685560),
+                accent: rgb(0x8a3558),
+                selected: rgb(0xf0dbe4),
+                green: rgb(0x216648),
+                red: rgb(0xa52c37),
+                warning: rgb(0x795100),
+                key: rgb(0x31578b),
+            },
             (Self::Orange, egui::Theme::Dark) => Palette {
                 bg: rgb(0x1e1c1a),
                 side: rgb(0x221f1d),
@@ -262,12 +358,12 @@ mod tests {
     #[test]
     fn missing_and_legacy_preferences_load_and_round_trip() {
         use Appearance::{Dark, Light, System};
-        use ThemeColor::{Blue, Green, Orange};
+        use ThemeColor::{Blue, Green, Monochrome, Orange};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("desktop-theme.json");
         let default = Theme {
-            color: Green,
+            color: Monochrome,
             appearance: System,
         };
         assert_eq!(Theme::load(&path).unwrap(), default);
@@ -287,8 +383,13 @@ mod tests {
             assert_eq!(Theme::load(&path).unwrap(), expected);
         }
 
-        default.save(&path).unwrap();
-        assert_eq!(Theme::load(&path).unwrap(), default);
+        for (color, _) in ThemeColor::OPTIONS {
+            for (appearance, _) in Appearance::OPTIONS {
+                let expected = Theme { color, appearance };
+                expected.save(&path).unwrap();
+                assert_eq!(Theme::load(&path).unwrap(), expected);
+            }
+        }
     }
 
     #[test]
