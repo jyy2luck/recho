@@ -1534,12 +1534,17 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                 .column(Column::initial(48.0).clip(true))
                 .column(Column::initial(36.0).clip(true))
                 .column(Column::initial(62.0).clip(true))
-                .column(Column::remainder().at_least(230.0).clip(true))
+                .column(
+                    Column::remainder()
+                        .at_least(230.0)
+                        .clip(true)
+                        .resizable(false),
+                )
                 .column(Column::initial(108.0).clip(true))
                 .column(Column::initial(65.0).clip(true))
                 .column(Column::initial(112.0).clip(true))
                 .column(Column::initial(75.0).clip(true))
-                .column(Column::initial(75.0).clip(true));
+                .column(Column::initial(75.0).clip(true).resizable(false));
             let table = if let Some(row) = scroll_to {
                 table.scroll_to_row(row, None)
             } else {
