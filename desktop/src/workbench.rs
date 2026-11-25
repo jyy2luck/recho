@@ -832,19 +832,28 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                         app.certificates.open(CertificatePage::Local);
                                     }
                                     let (active, pending) = app.system_proxy;
-                                    let title = if active || pending {
+                                    let title = if active {
+                                        "系统代理已启用，点击恢复"
+                                    } else if pending {
                                         "恢复系统代理"
                                     } else {
                                         "启用系统代理"
                                     };
-                                    if icon_button(
-                                        ui,
-                                        "\u{e894}",
-                                        title,
-                                        app.ready && (app.running || pending),
-                                    )
-                                    .clicked()
-                                    {
+                                    let enabled = app.ready && (app.running || pending);
+                                    let proxy = ui.add_enabled(
+                                        enabled,
+                                        egui::Button::selectable(active, icon("\u{e894}"))
+                                            .min_size(egui::vec2(28.0, 28.0)),
+                                    );
+                                    proxy.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::Button,
+                                            enabled,
+                                            active,
+                                            title,
+                                        )
+                                    });
+                                    if proxy.on_hover_text(title).clicked() {
                                         app.send(Command::SystemProxy(!active && !pending));
                                     }
                                     if icon_button(ui, "\u{e14d}", "复制代理地址", address_ready)
