@@ -746,22 +746,24 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
         Navigation::History => {
             ui.strong("历史");
             let mut date = app.history_date.clone();
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if ui.selectable_label(date.is_none(), "全部日期").clicked() {
-                    date = None;
-                }
-                for day in &app.history_days {
-                    if ui
-                        .selectable_label(
-                            date.as_ref() == Some(&day.date),
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if sidebar_row(ui, "全部日期", Some(date.is_none())).clicked() {
+                        date = None;
+                    }
+                    for day in &app.history_days {
+                        if sidebar_row(
+                            ui,
                             format!("{}  ({})", day.date, day.total),
+                            Some(date.as_ref() == Some(&day.date)),
                         )
                         .clicked()
-                    {
-                        date = Some(day.date.clone());
+                        {
+                            date = Some(day.date.clone());
+                        }
                     }
-                }
-            });
+                });
             if date != app.history_date {
                 app.history_date = date;
                 app.select(None);

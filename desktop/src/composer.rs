@@ -1174,6 +1174,8 @@ impl Composer {
         }
     }
     pub(super) fn show_sidebar(&mut self, ui: &mut egui::Ui, _: &Worker, environments: bool) {
+        use crate::workbench::sidebar_row;
+
         self.archive_notice(ui);
         let Some(document) = &mut self.document else {
             return;
@@ -1189,84 +1191,99 @@ impl Composer {
         let mut open_saved = None;
         let mut delete_saved = None;
         let mut remove_folder = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if environments {
-                let current = text(document, "activeEnvironmentID").to_owned();
-                let mut active = current.clone();
-                ui.selectable_value(&mut active, String::new(), "无环境");
-                for environment in rows(document, "environments") {
-                    let id = text(environment, "id");
-                    ui.push_id(id, |ui| {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(active == id, name(environment))
-                                .clicked()
-                            {
-                                active = id.into();
-                            }
-                            if ui.small_button("编辑").clicked() {
-                                edit_env = Some(id.to_string());
-                            }
-                        });
-                    });
-                }
-                if active != current {
-                    document["activeEnvironmentID"] = json!(active);
-                    changed = true;
-                }
-                if ui.button("新建环境变量").clicked() {
-                    edit_env = Some(String::new());
-                }
-            } else {
-                for folder in folders(document) {
-                    egui::CollapsingHeader::new(&folder)
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for entry in rows(document, "collections")
-                                .iter()
-                                .filter(|entry| text(entry, "folder") == folder)
-                            {
-                                let id = text(entry, "id");
-                                ui.push_id(id, |ui| {
-                                    let request = &entry["request"];
-                                    let item = ui.selectable_label(
-                                        false,
-                                        format!("{}  {}", text(request, "method"), name(request)),
-                                    );
-                                    if item.clicked() {
-                                        open_saved = Some(entry.clone());
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if environments {
+                    let current = text(document, "activeEnvironmentID").to_owned();
+                    let mut active = current.clone();
+                    if sidebar_row(ui, "无环境", Some(active.is_empty())).clicked() {
+                        active.clear();
+                    }
+                    for environment in rows(document, "environments") {
+                        let id = text(environment, "id");
+                        ui.push_id(id, |ui| {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("编辑").clicked() {
+                                        edit_env = Some(id.to_string());
                                     }
-                                    item.context_menu(|ui| {
-                                        if ui.button("删除 API").clicked() {
-                                            delete_saved = Some(id.to_string());
-                                            ui.close();
-                                        }
-                                    });
-                                });
-                            }
-                            if folder != DEFAULT_FOLDER
-                                && !rows(document, "collections")
-                                    .iter()
-                                    .any(|entry| text(entry, "folder") == folder)
-                                && ui.small_button("删除空集合").clicked()
-                            {
-                                remove_folder = Some(folder.clone());
-                            }
+                                    let title = name(environment);
+                                    if sidebar_row(ui, title, Some(active == id))
+                                        .on_hover_text(title)
+                                        .clicked()
+                                    {
+                                        active = id.into();
+                                    }
+                                },
+                            );
                         });
+                    }
+                    if active != current {
+                        document["activeEnvironmentID"] = json!(active);
+                        changed = true;
+                    }
+                    if sidebar_row(ui, "新建环境变量", None).clicked() {
+                        edit_env = Some(String::new());
+                    }
+                } else {
+                    ui.visuals_mut().collapsing_header_frame = true;
+                    for folder in folders(document) {
+                        egui::CollapsingHeader::new(&folder)
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for entry in rows(document, "collections")
+                                    .iter()
+                                    .filter(|entry| text(entry, "folder") == folder)
+                                {
+                                    let id = text(entry, "id");
+                                    ui.push_id(id, |ui| {
+                                        let request = &entry["request"];
+                                        let item = sidebar_row(
+                                            ui,
+                                            format!(
+                                                "{}  {}",
+                                                text(request, "method"),
+                                                name(request)
+                                            ),
+                                            None,
+                                        )
+                                        .on_hover_text(name(request));
+                                        if item.clicked() {
+                                            open_saved = Some(entry.clone());
+                                        }
+                                        item.context_menu(|ui| {
+                                            if ui.button("删除 API").clicked() {
+                                                delete_saved = Some(id.to_string());
+                                                ui.close();
+                                            }
+                                        });
+                                    });
+                                }
+                                if folder != DEFAULT_FOLDER
+                                    && !rows(document, "collections")
+                                        .iter()
+                                        .any(|entry| text(entry, "folder") == folder)
+                                    && sidebar_row(ui, "删除空集合", None).clicked()
+                                {
+                                    remove_folder = Some(folder.clone());
+                                }
+                            });
+                    }
+                    if sidebar_row(ui, "新建文件夹", None).clicked() {
+                        self.new_folder = Some(String::new());
+                    }
+                    if sidebar_row(ui, "导入请求 JSON", None).clicked() {
+                        self.transfer = Some(Transfer {
+                            kind: "导入请求 JSON",
+                            text: String::new(),
+                            target: None,
+                            error: None,
+                        });
+                    }
                 }
-                if ui.button("新建文件夹").clicked() {
-                    self.new_folder = Some(String::new());
-                }
-                if ui.button("导入请求 JSON").clicked() {
-                    self.transfer = Some(Transfer {
-                        kind: "导入请求 JSON",
-                        text: String::new(),
-                        target: None,
-                        error: None,
-                    });
-                }
-            }
-        });
+            });
         if let Some(folder) = remove_folder {
             rows_mut(document, "collectionFolders")
                 .retain(|entry| entry.as_str() != Some(folder.as_str()));
