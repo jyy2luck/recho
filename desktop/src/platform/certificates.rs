@@ -196,12 +196,14 @@ fn perform(path: &Path, action: CertificateAction) -> Result<Outcome, String> {
             snapshot
                 .write_all(&cert.der)
                 .map_err(|error| error.to_string())?;
+            // Windows certificate tools need the writable handle to be closed before reopening.
+            let snapshot = snapshot.into_temp_path();
             let error = match action {
-                Trust => change_trust(snapshot.path(), true).err(),
-                Untrust => change_trust(snapshot.path(), false).err(),
+                Trust => change_trust(&snapshot, true).err(),
+                Untrust => change_trust(&snapshot, false).err(),
                 _ => None,
             };
-            let (status, error) = match trust_status(snapshot.path(), &cert.der) {
+            let (status, error) = match trust_status(&snapshot, &cert.der) {
                 Ok(status) => (
                     Some(status),
                     error.or_else(|| {
@@ -330,8 +332,16 @@ fn store(path: &Path, operation: &str) -> Result<Output, String> {
     let mut command = Command::new(executable(
         "System32/WindowsPowerShell/v1.0/powershell.exe",
     )?);
+    let script = format!(
+        r"$ErrorActionPreference='Stop';
+        try {{ {operation} }} catch {{
+            $message=[Text.Encoding]::UTF8.GetBytes($_.Exception.Message);
+            [Console]::OpenStandardError().Write($message,0,$message.Length);
+            exit 1
+        }}"
+    );
     command
-        .args(["-NoProfile", "-NonInteractive", "-Command", operation])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .env_remove("PSModulePath")
         .env("RECHO_CA_FILE", path);
     output(&mut command)
@@ -341,8 +351,7 @@ fn store(path: &Path, operation: &str) -> Result<Output, String> {
 fn trust_status(path: &Path, _: &[u8]) -> Result<(bool, bool), String> {
     let result = store(
         path,
-        r"$ErrorActionPreference='Stop';
-        $expected=[System.Security.Cryptography.X509Certificates.X509Certificate2]::new($env:RECHO_CA_FILE);
+        r"$expected=[System.Security.Cryptography.X509Certificates.X509Certificate2]::new($env:RECHO_CA_FILE);
         foreach ($location in @('CurrentUser','LocalMachine')) {
             $store=[System.Security.Cryptography.X509Certificates.X509Store]::new('Root',$location);
             try {
@@ -373,8 +382,7 @@ fn change_trust(path: &Path, trust: bool) -> Result<(), String> {
     }
     checked(store(
         path,
-        r"$ErrorActionPreference='Stop';
-        $expected=[System.Security.Cryptography.X509Certificates.X509Certificate2]::new($env:RECHO_CA_FILE);
+        r"$expected=[System.Security.Cryptography.X509Certificates.X509Certificate2]::new($env:RECHO_CA_FILE);
         $store=[System.Security.Cryptography.X509Certificates.X509Store]::new('Root','CurrentUser');
         try {
             $store.Open('ReadWrite,OpenExistingOnly');
@@ -425,13 +433,21 @@ fn reveal(_: &Path) -> Result<(), String> {
     Err("当前平台不支持显示证书文件".into())
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", windows)))]
 mod tests {
     use super::*;
     use recho_core::native::DesktopEngine;
 
+    #[cfg(windows)]
+    #[test]
+    fn powershell_errors_are_utf8() {
+        let result = store(Path::new("."), "throw '证书测试'").unwrap();
+        assert!(!result.status.success());
+        assert_eq!(result.stderr, "证书测试".as_bytes());
+    }
+
     #[tokio::test]
-    async fn a_new_local_ca_is_readable_and_not_in_the_keychain() {
+    async fn a_new_local_ca_is_readable_and_not_in_the_system_store() {
         let temp = tempfile::tempdir().unwrap();
         let engine = DesktopEngine::start(temp.path().join("data"), Some(0))
             .await
