@@ -24,3 +24,17 @@ Windows 界面、高 DPI、中文输入法和真实系统代理/证书变更仍�
 [工作台](workbench.png) · [抓包详情](details.png) · [API 编辑器](composer.png)。
 
 macOS arm64 Release 样本和采样设置见 [macos-release.json](macos-release.json) 与 [smoke-macos.py](../scripts/smoke-macos.py)。
+
+### Windows 窗口缩放内存
+
+2026-11-25 在 Windows x64、Intel UHD Graphics 630（驱动 30.0.100.9864）上测试 Release 版。使用空数据目录和随机代理端口，以 1450 × 900 像素窗口采集初始工作集。随后将窗口设为 1120 × 670 像素，分 100 步放大到 1720 × 970。
+
+| 渲染配置 | 初始工作集 | 第 100 步工作集 | 缩放期间峰值 |
+| --- | ---: | ---: | ---: |
+| 旧版 OpenGL | 84.8 MiB | 427.0 MiB | 444.7 MiB |
+| Direct3D 12，低内存分配及默认描述符数量 | 144.9 MiB | 150.3 MiB | 158.3 MiB |
+| Direct3D 12，低内存分配及 65,536 个非采样器绑定 | 85.9 MiB | 91.1 MiB | 99.3 MiB |
+
+Windows 使用 wgpu 的 Direct3D 12 后端和低内存分配策略，并将非采样器绑定上限从 1,000,000 降至 65,536，以缩小设备创建时分配的描述符堆。macOS 使用 Glow。 [渲染配置](../desktop/src/main.rs)
+
+最终版停止缩放 4 秒后工作集为 91.1 MiB，回环 HTTP 代理转发通过，响应字节与夹具一致。切换渲染后端后，25 项 Windows 桌面单元测试通过。调整描述符上限后，重新验证了 Release 构建、缩放和回环 HTTP 转发。 [验收标准](../specs/002-windows-resize-memory/spec.md)

@@ -911,6 +911,24 @@ fn options() -> Result<(PathBuf, Option<u16>), String> {
         .transpose()?;
     Ok((directory, port))
 }
+#[cfg(windows)]
+fn windows_wgpu_options() -> eframe::WgpuConfiguration {
+    let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+    setup.instance_descriptor.backends = wgpu::Backends::DX12;
+    let default_descriptor = std::sync::Arc::clone(&setup.device_descriptor);
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+        let mut descriptor = default_descriptor(adapter);
+        descriptor.memory_hints = wgpu::MemoryHints::MemoryUsage;
+        // DX12 sizes its descriptor heap up front. Egui needs far fewer than the default million.
+        descriptor.required_limits.max_non_sampler_bindings = 65_536;
+        descriptor
+    });
+    eframe::WgpuConfiguration {
+        wgpu_setup: setup.into(),
+        ..Default::default()
+    }
+}
+
 fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--mcp") {
         let result = tokio::runtime::Builder::new_current_thread()
@@ -942,6 +960,11 @@ fn main() -> eframe::Result {
             .with_app_id("io.github.jyy2luck.recho")
             .with_decorations(!cfg!(windows))
             .with_icon(icon.clone()),
+        #[cfg(windows)]
+        renderer: eframe::Renderer::Wgpu,
+        #[cfg(windows)]
+        wgpu_options: windows_wgpu_options(),
+        #[cfg(not(windows))]
         renderer: eframe::Renderer::Glow,
         multisampling: 0,
         depth_buffer: 0,

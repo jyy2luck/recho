@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
-eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts"] }
 recho-engine = { path = "../engine" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "macros", "io-util", "process"] }
 egui_extras = { version = "=0.36.2", default-features = false }
@@ -27,6 +27,9 @@ zip = { version = "4.6.1", default-features = false }
 [build-dependencies]
 winresource = { version = "0.1.34", default-features = false }
 
+[target.'cfg(not(windows))'.dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["glow"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 objc2 = "0.6"
@@ -34,5 +37,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppl
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSObject", "NSString", "NSURL"] }
 
 [target.'cfg(windows)'.dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["wgpu_no_default_features"] }
 raw-window-handle = "0.6"
+wgpu = { version = "30.0", default-features = false, features = ["dx12"] }
 windows-sys = { version = "0.61", features = ["Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

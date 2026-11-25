@@ -1,6 +1,6 @@
 # recho
 
-Windows/macOS 抓包工具的纯 Rust 重写，使用 **egui/eframe + Glow** 构建界面，
+Windows/macOS 抓包工具的纯 Rust 重写，使用 **egui/eframe** 构建界面，
 直接链接 Rust 引擎。无需 Flutter、Dart 或 WebView，无账号和云服务。
 
 界面与操作以 [Respable](https://github.com/jyy2luck/Respable) 的 `a24b1c9` 为参照。引擎以 `762a5902c84f91ec250640c6123c1a5286cd658d` 的独立副本为基础，可单独构建。
@@ -11,7 +11,7 @@ Windows/macOS 抓包工具的纯 Rust 重写，使用 **egui/eframe + Glow** 构
 - macOS 使用原生系统菜单，Windows 使用窗口菜单。两个平台都有六套主题及代理、证书入口。
 
 抓包列表只同步摘要，打开详情时读取正文。列表与长文本使用虚拟滚动，空闲时按事件重绘。
-桌面渲染使用 Glow/OpenGL，Windows 的驱动、DPI 和复杂输入法仍待实机验证。
+Windows 使用 wgpu/Direct3D 12 渲染，macOS 使用 Glow/OpenGL。
 
 ![recho 工作台](research/workbench.png)
 
