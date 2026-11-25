@@ -1,8 +1,5 @@
 use crate::worker::MatchHandle;
-use crate::{
-    Recho, Row,
-    worker::{HistoryHandle, RequestHandle},
-};
+use crate::{Recho, worker::RequestHandle};
 use eframe::egui;
 use recho_core::native::ConditionSet;
 use serde::{Deserialize, Serialize};
@@ -28,8 +25,6 @@ pub struct Space {
     pub details_open: bool,
     pub descending: bool,
     pub sort: usize,
-    pub cleared_through: String,
-    pub hidden: BTreeSet<String>,
     pub conditions: ConditionSet,
     pub highlights: ConditionSet,
     pub highlight_color: Option<String>,
@@ -47,13 +42,10 @@ pub(super) struct Spaces {
     pub incognito: bool,
     pub items: BTreeMap<String, Space>,
     saved: BTreeMap<String, Space>,
-    pub load: Option<HistoryHandle>,
-    pub rows: Vec<Row>,
     pub settings: Option<RequestHandle>,
     closing_group: Option<String>,
     save_at: Option<Instant>,
     pub error: Option<String>,
-    volatile_hidden: BTreeSet<String>,
     match_job: Option<MatchHandle>,
     pub filter_draft: ConditionSet,
     pub filter_error: Option<String>,
@@ -93,13 +85,10 @@ impl Spaces {
             incognito: false,
             saved: items.clone(),
             items,
-            load: None,
             settings: None,
             closing_group: None,
-            rows: vec![],
             save_at: None,
             error,
-            volatile_hidden: BTreeSet::new(),
             match_job: None,
             filter_draft: ConditionSet::default(),
             filter_error: None,
@@ -152,20 +141,22 @@ impl Recho {
         space.status = self.status_filter;
         space.sort = self.sort_column;
         space.descending = !self.ascending;
-        if self.spaces.load.is_none() {
-            space.selection = self
-                .selection
-                .iter()
-                .filter(|id| self.rows.iter().any(|row| &row.id == *id && !row.incognito))
-                .cloned()
-                .collect();
-            space.detail = self
-                .selected
-                .as_ref()
-                .filter(|id| space.selection.contains(*id))
-                .cloned();
-            space.details_open = self.details_open;
-        }
+        space.selection = self
+            .selection
+            .iter()
+            .filter(|id| {
+                self.capture_positions
+                    .get(*id)
+                    .is_some_and(|&index| !self.rows[index].incognito)
+            })
+            .cloned()
+            .collect();
+        space.detail = self
+            .selected
+            .as_ref()
+            .filter(|id| space.selection.contains(*id))
+            .cloned();
+        space.details_open = self.details_open;
     }
 
     pub(super) fn open_capture_space(&mut self, group: String) {
@@ -174,10 +165,12 @@ impl Recho {
         }
         self.remember_capture();
         if let Some(closed) = self.spaces.closing_group.take() {
-            self.spaces.items.remove(&closed);
+            self.archive_closed_space(closed);
         }
         self.spaces.group = group;
-        self.spaces.rows.clear();
+        self.capture_positions.clear();
+        self.rows.clear();
+        self.visible.clear();
         self.spaces.match_job = None;
         self.spaces.matches = None;
         self.spaces.marked.clear();
@@ -211,54 +204,24 @@ impl Recho {
         if self.navigation != crate::Navigation::History {
             self.select(None);
             self.details_open = state.details_open;
+            self.selection = state.selection;
+            self.select_detail(state.detail);
         }
-        match self.worker.history(0, 200, String::new(), Some(group)) {
-            Ok(reply) => self.spaces.load = Some(reply),
-            Err(error) => self.error = Some(error),
-        }
-        self.rebuild_capture_rows();
     }
 
     pub(super) fn rebuild_capture_rows(&mut self) {
-        let group = &self.spaces.group;
-        self.spaces
-            .volatile_hidden
-            .retain(|id| self.live_rows.iter().any(|row| &row.id == id));
-        let Some(space) = self.spaces.current() else {
-            return;
-        };
-        let mut ids = BTreeSet::new();
-        let mut rows: Vec<_> = self
-            .live_rows
-            .iter()
-            .chain(&self.spaces.rows)
-            .filter(|row| {
-                &row.group == group
-                    && row.started_at > space.cleared_through
-                    && !space.hidden.contains(&row.id)
-                    && !self.spaces.volatile_hidden.contains(&row.id)
-                    && ids.insert(row.id.clone())
-            })
-            .cloned()
-            .collect();
-        rows.sort_by(|a, b| a.started_at.cmp(&b.started_at));
-        if rows.len() > 200 {
-            rows.drain(..rows.len() - 200);
-        }
-        self.rows = rows;
         self.sequence
-            .retain(|id, _| self.rows.iter().any(|row| &row.id == id));
+            .retain(|id, _| self.capture_positions.contains_key(id));
         for row in &self.rows {
             if !self.sequence.contains_key(&row.id) {
                 self.sequence.insert(row.id.clone(), self.next_sequence);
                 self.next_sequence += 1;
             }
         }
-        self.refilter();
         self.evaluate_conditions();
         if self.navigation != crate::Navigation::History {
             self.selection
-                .retain(|id| self.rows.iter().any(|row| &row.id == id));
+                .retain(|id| self.capture_positions.contains_key(id));
             if self
                 .selected
                 .as_ref()
@@ -293,8 +256,8 @@ impl Recho {
         }
         if !filtering {
             self.spaces.matches = None;
-            self.refilter();
         }
+        self.refilter();
     }
 
     pub(super) fn activate_capture(&mut self, group: String) {
@@ -351,46 +314,36 @@ impl Recho {
                 self.spaces.closing_group = Some(group.into());
             }
         } else {
-            self.spaces.items.remove(group);
+            self.archive_closed_space(group.into());
         }
+    }
+
+    fn archive_closed_space(&mut self, group: String) {
+        self.send(crate::Command::Archive {
+            group,
+            ids: None,
+            close: true,
+        });
     }
 
     pub(super) fn clear_capture_space(&mut self) {
-        if let Some(space) = self.spaces.items.get_mut(&self.spaces.group) {
-            if let Some(newest) = self.rows.iter().rev().find(|row| !row.incognito) {
-                space.cleared_through.clone_from(&newest.started_at);
-            }
-            space.hidden.clear();
+        if self.ready && !self.spaces.group.is_empty() {
+            self.send(crate::Command::Archive {
+                group: self.spaces.group.clone(),
+                ids: None,
+                close: false,
+            });
         }
-        let group = self.spaces.group.clone();
-        self.spaces.volatile_hidden.extend(
-            self.live_rows
-                .iter()
-                .filter(|row| row.group == group && row.incognito)
-                .map(|row| row.id.clone()),
-        );
-        self.send(crate::Command::Clear(group));
-        self.select(None);
-        self.rebuild_capture_rows();
     }
 
     pub(super) fn hide_selection(&mut self) {
-        if let Some(space) = self.spaces.items.get_mut(&self.spaces.group) {
-            space.hidden.extend(
-                self.rows
-                    .iter()
-                    .filter(|row| self.selection.contains(&row.id) && !row.incognito)
-                    .map(|row| row.id.clone()),
-            );
+        if !self.selection.is_empty() {
+            self.send(crate::Command::Archive {
+                group: self.spaces.group.clone(),
+                ids: Some(self.selection.iter().cloned().collect()),
+                close: false,
+            });
         }
-        self.spaces.volatile_hidden.extend(
-            self.live_rows
-                .iter()
-                .filter(|row| row.incognito && self.selection.contains(&row.id))
-                .map(|row| row.id.clone()),
-        );
-        self.select(None);
-        self.rebuild_capture_rows();
     }
 
     pub(super) fn poll_capture_spaces(&mut self) {
@@ -429,37 +382,6 @@ impl Recho {
                     self.spaces.closing_group = None;
                     self.error = Some(error.to_string());
                 }
-            }
-        }
-        if let Some(reply) = &mut self.spaces.load {
-            let result = match reply.try_recv() {
-                Ok(result) => result,
-                Err(TryRecvError::Empty) => return,
-                Err(error) => Err(error.to_string()),
-            };
-            self.spaces.load = None;
-            match result {
-                Ok(rows) => {
-                    self.spaces.rows = rows;
-                    self.rebuild_capture_rows();
-                    if self.navigation != crate::Navigation::History && self.selected.is_none() {
-                        if let Some(space) = self.spaces.current() {
-                            let selection = space
-                                .selection
-                                .iter()
-                                .filter(|id| self.rows.iter().any(|row| &row.id == *id))
-                                .cloned()
-                                .collect();
-                            let detail = space
-                                .detail
-                                .clone()
-                                .filter(|id| self.rows.iter().any(|row| &row.id == id));
-                            self.selection = selection;
-                            self.select_detail(detail);
-                        }
-                    }
-                }
-                Err(error) => self.error = Some(error),
             }
         }
     }

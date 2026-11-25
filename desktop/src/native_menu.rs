@@ -395,7 +395,7 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
             }
         }
         Action::ToggleCapture => app.toggle_capture(),
-        Action::Clear => app.clear_confirmation = true,
+        Action::Clear => app.clear_capture_space(),
         Action::Incognito => app.set_incognito(!app.spaces.incognito),
         Action::Rules(category) => {
             app.navigate(Navigation::Tools);

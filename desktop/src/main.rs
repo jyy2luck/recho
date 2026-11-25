@@ -22,7 +22,7 @@ mod worker;
 
 use body::{Content, hex_row};
 use eframe::egui::{self, RichText};
-use recho_core::native::{Detail, Phase, Row};
+use recho_core::native::{Detail, HistoryDay, HistoryDeletion, Phase, Row};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -189,7 +189,7 @@ struct Recho {
     spaces: capture_spaces::Spaces,
     capture_filters: Vec<String>,
     highlight_editor: Option<(recho_core::native::ConditionSet, String)>,
-    live_rows: Vec<Row>,
+    capture_positions: BTreeMap<String, usize>,
     har_file: Option<(files::FilePick, Option<Vec<String>>)>,
     response_save: Option<body::response::SaveHandle>,
     notice: Option<String>,
@@ -200,6 +200,10 @@ struct Recho {
     confirm_proxy_auto: bool,
     navigation: Navigation,
     history_rows: Vec<Row>,
+    history_days: Vec<HistoryDay>,
+    history_date: Option<String>,
+    history_archived: BTreeSet<String>,
+    history_delete: Option<HistoryDeletion>,
     history_query: String,
     history_offset: usize,
     history_load: Option<HistoryHandle>,
@@ -236,7 +240,6 @@ struct Recho {
     details_open: bool,
     sidebar_visible: bool,
     connection_open: bool,
-    clear_confirmation: bool,
     error: Option<String>,
     history_error: Option<String>,
 }
@@ -284,7 +287,7 @@ impl Recho {
             theme_path,
             spaces: capture_spaces::Spaces::new(directory.join("desktop-captures.json")),
             worker: Worker::start(directory, port, cc.egui_ctx.clone()),
-            live_rows: Vec::new(),
+            capture_positions: BTreeMap::new(),
             capture_filters: Vec::new(),
             highlight_editor: None,
             har_file: None,
@@ -306,6 +309,10 @@ impl Recho {
             confirm_proxy_auto: false,
             navigation: Navigation::Capture,
             history_rows: Vec::new(),
+            history_days: Vec::new(),
+            history_date: None,
+            history_archived: BTreeSet::new(),
+            history_delete: None,
             history_query: String::new(),
             history_offset: 0,
             history_load: None,
@@ -345,7 +352,6 @@ impl Recho {
             details_open: false,
             sidebar_visible: true,
             connection_open: false,
-            clear_confirmation: false,
             error: theme_error,
             history_error: None,
         }
@@ -413,12 +419,18 @@ impl Recho {
         }
     }
     fn select_row(&mut self, id: String, modifiers: egui::Modifiers) {
-        if self.navigation == Navigation::History || (!modifiers.command && !modifiers.shift) {
+        if !modifiers.command && !modifiers.shift {
             self.select(Some(id));
             return;
         }
         if modifiers.shift {
-            let position = |id: &str| self.visible.iter().position(|&i| self.rows[i].id == id);
+            let rows = workbench::visible_rows(
+                &self.rows,
+                &self.visible,
+                &self.history_rows,
+                self.navigation == Navigation::History,
+            );
+            let position = |id: &str| rows.iter().position(|row| row.id == id);
             if let (Some(anchor), Some(end)) = (
                 self.selection_anchor.as_deref().and_then(position),
                 position(&id),
@@ -427,9 +439,9 @@ impl Recho {
                     self.selection.clear();
                 }
                 self.selection.extend(
-                    self.visible[anchor.min(end)..=anchor.max(end)]
+                    rows[anchor.min(end)..=anchor.max(end)]
                         .iter()
-                        .map(|&i| self.rows[i].id.clone()),
+                        .map(|row| row.id.clone()),
                 );
             } else {
                 self.selection.insert(id.clone());
@@ -496,10 +508,11 @@ impl Recho {
         self.network.open(section);
     }
     fn load_history(&mut self, offset: usize) {
-        match self
-            .worker
-            .history(offset, 100, self.history_query.trim().into(), None)
-        {
+        match self.worker.history(
+            offset,
+            self.history_query.trim().into(),
+            self.history_date.clone(),
+        ) {
             Ok(request) => {
                 self.history_offset = offset;
                 self.history_load = Some(request);
@@ -768,17 +781,40 @@ impl Recho {
                 self.capture_filters = snapshot.enabled_list_filters;
                 self.refilter();
             }
-            if let Some(rows) = snapshot.rows {
-                self.live_rows = rows;
-                self.rebuild_capture_rows();
-                if self.messages.iter().any(|panel| {
-                    panel
-                        .viewer
-                        .as_ref()
-                        .is_some_and(|viewer| viewer.detail.notice.is_some())
-                }) {
-                    self.select_detail(self.selected.clone());
+        }
+        if let Some(captures) = inbox.captures
+            && captures.group == self.spaces.group
+        {
+            if captures.replace {
+                self.capture_positions.clear();
+                self.rows.clear();
+            }
+            let mut incoming: Vec<_> = captures.rows.into_values().collect();
+            incoming.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+            for row in incoming {
+                match self.capture_positions.entry(row.id.clone()) {
+                    std::collections::btree_map::Entry::Occupied(position) => {
+                        self.rows[*position.get()] = row;
+                    }
+                    std::collections::btree_map::Entry::Vacant(position) => {
+                        position.insert(self.rows.len());
+                        self.rows.push(row);
+                    }
                 }
+            }
+            self.rebuild_capture_rows();
+            if self.messages.iter().any(|panel| {
+                panel
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|viewer| viewer.detail.notice.is_some())
+            }) {
+                self.select_detail(self.selected.clone());
+            }
+        }
+        for group in inbox.closed_captures {
+            if group != self.spaces.group {
+                self.spaces.items.remove(&group);
             }
         }
         for (index, result) in inbox.details.into_iter().enumerate() {
@@ -839,20 +875,37 @@ impl Recho {
             self.activate_capture(group);
             self.notice = Some(format!("已导入 {count} 条 HAR 记录"));
         }
+        if inbox.history_changed && self.navigation == Navigation::History {
+            self.load_history(0);
+        }
         if let Some(request) = &mut self.history_load {
             match request.try_recv() {
-                Ok(Ok(rows)) => {
+                Ok(Ok(page)) => {
                     if self.navigation == Navigation::History
                         && self
                             .selected
                             .as_ref()
-                            .is_some_and(|id| !rows.iter().any(|row| &row.id == id))
+                            .is_some_and(|id| !page.rows.iter().any(|row| &row.id == id))
                     {
                         self.select(None);
                     }
-                    self.history_rows = rows;
+                    if self.navigation == Navigation::History {
+                        self.selection
+                            .retain(|id| page.rows.iter().any(|row| &row.id == id));
+                    }
+                    self.history_rows = page.rows;
+                    self.history_archived = page.archived;
+                    self.history_days = page.days;
                     self.history_loaded = true;
                     self.history_load = None;
+                    if self
+                        .history_date
+                        .as_ref()
+                        .is_some_and(|date| !self.history_days.iter().any(|day| &day.date == date))
+                    {
+                        self.history_date = None;
+                        self.load_history(0);
+                    }
                 }
                 Ok(Err(error)) => {
                     self.error = Some(error);

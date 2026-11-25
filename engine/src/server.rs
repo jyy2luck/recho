@@ -142,6 +142,7 @@ fn error_reply(error: Error) -> Reply {
 }
 
 struct Config {
+    desktop_captures: bool,
     proxy_host: std::net::Ipv4Addr,
     token: String,
     directory: PathBuf,
@@ -170,6 +171,7 @@ impl Config {
             return Err(Error::bad("The engine data directory must be absolute"));
         }
         Ok(Self {
+            desktop_captures: false,
             proxy_host: if cfg!(any(
                 target_os = "windows",
                 target_os = "macos",
@@ -209,6 +211,7 @@ impl Config {
             .join(crate::identity::DATA_DIRECTORY),
         };
         Ok(Self {
+            desktop_captures: false,
             proxy_host: std::net::Ipv4Addr::UNSPECIFIED,
             token,
             directory,
@@ -3216,6 +3219,7 @@ impl Running {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn start_embedded(
     directory: PathBuf,
     port: Option<u16>,
@@ -3242,6 +3246,9 @@ async fn start(config: Config) -> Result<Running> {
         .lock()
         .unwrap()
         .configure(&settings.snapshot(), config.request)?;
+    if config.desktop_captures {
+        history.lock().unwrap().enable_desktop_captures()?;
+    }
     let engine = Arc::new(Engine {
         mcp_tokens: Mutex::new(crate::mcp::AccessTokens::load(&config.directory)?),
         proxy: tokio::sync::Mutex::new(Proxy {

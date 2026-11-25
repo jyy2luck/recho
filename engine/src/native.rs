@@ -8,6 +8,7 @@ mod har;
 pub use crate::certificates::PublicCertificate;
 pub use crate::identity::CERTIFICATE_DOWNLOAD_URL;
 pub use crate::local_network::proxy_addresses;
+pub use crate::storage::desktop_history::{CaptureBatch, HistoryDay, HistoryDeletion, HistoryPage};
 pub use capture_conditions::{CaptureMatches, Condition, ConditionSet, Field, Operator};
 
 pub fn write_local_file(path: &std::path::Path, bytes: &[u8]) -> std::result::Result<(), String> {
@@ -142,14 +143,17 @@ impl DesktopEngine {
     ) -> std::result::Result<Self, String> {
         let settings = crate::settings::SettingsStore::open(&directory);
         let port = port.into().or(settings.snapshot().proxy_port).unwrap_or(0);
-        start_embedded(
+        let mut config = Config::embedded(
             directory,
             Some(port),
             uuid::Uuid::new_v4().simple().to_string(),
         )
-        .await
-        .map(|running| Self { running })
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())?;
+        config.desktop_captures = true;
+        start(config)
+            .await
+            .map(|running| Self { running })
+            .map_err(|error| error.to_string())
     }
 
     pub fn ca_path(&self) -> PathBuf {
@@ -201,13 +205,21 @@ impl DesktopEngine {
     }
 
     pub async fn snapshot(&self, revision: Option<u64>) -> Snapshot {
+        self.read_snapshot(revision, true).await
+    }
+
+    pub async fn status(&self) -> Snapshot {
+        self.read_snapshot(None, false).await
+    }
+
+    async fn read_snapshot(&self, revision: Option<u64>, include_rows: bool) -> Snapshot {
         let engine = &self.running.engine;
         let proxy = engine.proxy.lock().await;
         let history = engine.history.lock().unwrap();
         let settings = engine.settings.snapshot();
         Snapshot {
             revision: history.revision,
-            rows: (revision != Some(history.revision))
+            rows: (include_rows && revision != Some(history.revision))
                 .then(|| history.sessions.iter().rev().map(Row::from).collect()),
             running: proxy.running,
             port: proxy.port,
@@ -269,6 +281,59 @@ impl DesktopEngine {
             .unwrap()
             .clear_group(group);
         Ok(())
+    }
+
+    pub fn capture_batch(
+        &self,
+        group: &str,
+        switched: bool,
+    ) -> std::result::Result<Option<CaptureBatch>, String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .take_capture_batch(group, switched)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn archive_captures(
+        &self,
+        group: &str,
+        ids: Option<&[String]>,
+    ) -> std::result::Result<(usize, usize), String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .archive_captures(group, ids)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn desktop_history_page(
+        &self,
+        date: Option<&str>,
+        offset: usize,
+        query: &str,
+    ) -> std::result::Result<HistoryPage, String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .desktop_history_page(date, offset, query)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn delete_archived(&self, target: HistoryDeletion) -> std::result::Result<usize, String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .delete_archived(target)
+            .map_err(|error| error.to_string())
     }
 
     pub async fn set_port(&self, port: u16) -> std::result::Result<(), String> {

@@ -49,7 +49,7 @@ RECHO_DATA_DIR="$(mktemp -d)" RECHO_PROXY_PORT=0 app/build/release/recho
 
 `RECHO_DATA_DIR` 必须是绝对路径；`RECHO_PROXY_PORT` 可指定 0–65535。
 请为 recho 使用独立目录，不要指向正在运行的 Respable 数据目录。
-抓包默认落盘，清空当前调试会话后可从 F4 历史查看已归档记录。无痕流量只保留在内存。
+调试标签保留本轮全部抓包，重启后恢复已落盘的记录。上方垃圾桶或 Ctrl+X 可清空当前标签。普通记录可在 F4 历史按日期查看和删除，无痕记录只保存在内存中，清空后丢弃。
 打开调试工具中的 MCP 可查看连接配置和管理访问令牌。
 
 ## 验证和范围

@@ -16,6 +16,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use crate::wire::{Capture, Headers, Result};
 
+#[path = "desktop_history.rs"]
+pub(crate) mod desktop_history;
+
 pub fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
@@ -188,6 +191,7 @@ pub struct History {
     retention_days: u32,
     full_limit: usize,
     volatile_bodies: BTreeMap<(String, String), Vec<u8>>,
+    desktop_updates: Option<desktop_history::CaptureUpdates>,
 }
 impl History {
     pub fn open(directory: &Path, limit: usize) -> Result<Self> {
@@ -211,6 +215,7 @@ impl History {
             retention_days: 0,
             full_limit: 16 * 1024 * 1024,
             volatile_bodies: BTreeMap::new(),
+            desktop_updates: None,
         };
         private_dir(&directory.join("bodies"))?;
         // The live buffer belongs to this engine run. Saved records remain
@@ -252,10 +257,26 @@ impl History {
         self.session_revisions
             .insert(session.id.clone(), self.revision);
         self.sessions.insert(0, session.clone());
-        for removed in self.sessions.drain(self.limit.min(self.sessions.len())..) {
-            self.session_revisions.remove(&removed.id);
+        if self.desktop_updates.is_some() {
+            if !session.incognito {
+                let overflow = self
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| !row.incognito)
+                    .nth(self.limit);
+                if let Some((index, _)) = overflow {
+                    let removed = self.sessions.remove(index);
+                    self.session_revisions.remove(&removed.id);
+                }
+            }
+        } else {
+            for removed in self.sessions.drain(self.limit.min(self.sessions.len())..) {
+                self.session_revisions.remove(&removed.id);
+            }
         }
         if session.incognito {
+            self.publish_capture(session);
             return;
         }
         if let Err(error) = self.db.execute(
@@ -267,6 +288,8 @@ impl History {
             ],
         ) {
             self.error = Some(format!("Cannot save request history: {error}"));
+        } else {
+            self.publish_capture(session);
         }
     }
     pub fn save(&mut self, session: &Session) {
@@ -277,6 +300,9 @@ impl History {
                 .insert(session.id.clone(), self.revision);
         }
         if session.incognito {
+            if self.session_revisions.contains_key(&session.id) {
+                self.publish_capture(session);
+            }
             return;
         }
         if let Err(error) = self.db.execute(
@@ -284,6 +310,12 @@ impl History {
             params![serde_json::to_string(session).unwrap(), session.id],
         ) {
             self.error = Some(format!("Cannot save request history: {error}"));
+        } else if self.desktop_updates.is_some() {
+            match self.is_archived(&session.id) {
+                Ok(Some(false)) => self.publish_capture(session),
+                Ok(_) => {}
+                Err(error) => self.error = Some(format!("Cannot read capture status: {error}")),
+            }
         }
     }
     pub fn clear_live(&mut self) {
@@ -291,6 +323,7 @@ impl History {
         self.revision += 1;
         self.session_revisions.clear();
         self.volatile_bodies.clear();
+        self.reset_capture_updates();
     }
     pub fn clear_group(&mut self, group: &str) {
         self.sessions.retain(|session| {
@@ -304,6 +337,7 @@ impl History {
         self.volatile_bodies
             .retain(|(id, _), _| self.session_revisions.contains_key(id));
         self.revision += 1;
+        self.reset_capture_updates();
     }
     pub fn import_records(
         &mut self,
@@ -343,6 +377,7 @@ impl History {
         self.revision += 1;
         self.session_revisions.clear();
         self.volatile_bodies.clear();
+        self.reset_capture_updates();
         for entry in fs::read_dir(self.directory.join("bodies"))? {
             let entry = entry?;
             if entry.file_type()?.is_file() {
@@ -401,17 +436,19 @@ impl History {
         if id.contains('/') || id.contains('\\') {
             return Err(crate::wire::Error::bad("Invalid history ID"));
         }
+        for phase in ["request", "response"] {
+            match fs::remove_file(self.body_path(id, phase)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.db.execute("DELETE FROM sessions WHERE id=?", [id])?;
         self.sessions.retain(|s| s.id != id);
         self.revision += 1;
         self.session_revisions.remove(id);
         self.volatile_bodies.retain(|(key, _), _| key != id);
-        for phase in ["request", "response"] {
-            let path = self.body_path(id, phase);
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
-        }
+        self.reset_capture_updates();
         Ok(())
     }
     pub fn get(&self, id: &str) -> Result<Option<Session>> {
@@ -473,8 +510,10 @@ impl History {
         if session.incognito {
             self.volatile_bodies
                 .insert((session.id.clone(), phase.into()), capture.archive.clone());
-            self.volatile_bodies
-                .retain(|(id, _), _| self.sessions.iter().any(|s| &s.id == id));
+            if self.desktop_updates.is_none() {
+                self.volatile_bodies
+                    .retain(|(id, _), _| self.sessions.iter().any(|s| &s.id == id));
+            }
         } else {
             atomic_write(&self.body_path(&session.id, phase), &capture.archive)?;
         }

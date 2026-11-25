@@ -5,6 +5,33 @@ use egui_extras::{Column, TableBuilder};
 
 const NEW_HTTP: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::T);
+const CLEAR_CAPTURE: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::CTRL, egui::Key::X);
+
+fn clear_capture_pressed(input: &mut egui::InputState) -> bool {
+    if input.consume_shortcut(&CLEAR_CAPTURE) {
+        return true;
+    }
+    // egui-winit translates Ctrl+X to a clipboard event on Windows and Linux.
+    let ctrl_only = |modifiers: egui::Modifiers| {
+        modifiers.ctrl && !modifiers.alt && !modifiers.shift && !modifiers.mac_cmd
+    };
+    let ctrl_x = ctrl_only(input.modifiers) || input.events.iter().any(|event| {
+        matches!(event, egui::Event::Key { key: egui::Key::X, pressed: false, modifiers, .. } if ctrl_only(*modifiers))
+    });
+    if !ctrl_x {
+        return false;
+    }
+    let Some(index) = input
+        .events
+        .iter()
+        .position(|event| matches!(event, egui::Event::Cut))
+    else {
+        return false;
+    };
+    input.events.remove(index);
+    true
+}
 
 #[cfg(not(target_os = "macos"))]
 pub(super) const MENU_HEIGHT: f32 = if cfg!(windows) { 32.0 } else { 30.0 };
@@ -410,7 +437,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             app.set_incognito(incognito);
                         }
                         if ui.button("清空捕获").clicked() {
-                            app.clear_confirmation = true;
+                            app.clear_capture_space();
                             ui.close();
                         }
                     }),
@@ -718,7 +745,28 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
         }
         Navigation::History => {
             ui.strong("历史");
-            ui.weak("按最近捕获时间浏览本地记录");
+            let mut date = app.history_date.clone();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if ui.selectable_label(date.is_none(), "全部日期").clicked() {
+                    date = None;
+                }
+                for day in &app.history_days {
+                    if ui
+                        .selectable_label(
+                            date.as_ref() == Some(&day.date),
+                            format!("{}  ({})", day.date, day.total),
+                        )
+                        .clicked()
+                    {
+                        date = Some(day.date.clone());
+                    }
+                }
+            });
+            if date != app.history_date {
+                app.history_date = date;
+                app.select(None);
+                app.load_history(0);
+            }
             return;
         }
         _ => {}
@@ -878,7 +926,7 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                             let (dot, painter) =
                                 ui.allocate_painter(egui::vec2(6.0, 6.0), egui::Sense::hover());
                             painter.circle_filled(dot.rect.center(), 3.0, status);
-                            let text_width = (ui.available_width() - 4.0 * (28.0 + gap)).max(0.0);
+                            let text_width = (ui.available_width() - 5.0 * (28.0 + gap)).max(0.0);
                             ui.allocate_ui_with_layout(
                                 egui::vec2(text_width, 28.0),
                                 layout,
@@ -955,6 +1003,33 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                                     {
                                         ui.ctx().copy_text(app.proxy_address());
                                     }
+                                    let enabled = app.ready && app.spaces.settings.is_none();
+                                    let active = app.spaces.incognito;
+                                    let button = egui::Button::selectable(active, icon("\u{e8f5}"))
+                                        .min_size(egui::vec2(28.0, 28.0));
+                                    let toggle = ui.add_enabled(
+                                        enabled,
+                                        if active {
+                                            button.fill(colors.accent)
+                                        } else {
+                                            button
+                                        },
+                                    );
+                                    toggle.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::Button,
+                                            enabled,
+                                            active,
+                                            "无痕抓包",
+                                        )
+                                    });
+                                    if toggle.on_hover_text(if active {
+                                        "无痕抓包已开启。新记录仅保存在内存中，清空后无法找回。"
+                                    } else {
+                                        "无痕抓包。开启后，新记录仅保存在内存中，清空后无法找回。"
+                                    }).clicked() {
+                                        app.set_incognito(!active);
+                                    }
                                 },
                             );
                         });
@@ -984,8 +1059,8 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
                 clear.widget_info(|| {
                     egui::WidgetInfo::labeled(egui::WidgetType::Button, app.ready, "清空捕获")
                 });
-                if clear.on_hover_text("清空捕获").clicked() {
-                    app.clear_confirmation = true;
+                if clear.on_hover_text("清空捕获（Ctrl+X）").clicked() {
+                    app.clear_capture_space();
                 }
             });
         });
@@ -1205,6 +1280,36 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
         }
         ui.weak(format!("第 {} 页", app.history_offset / 100 + 1));
     });
+    ui.horizontal(|ui| {
+        let loaded = app.history_load.is_none();
+        let selected = !app.selection.is_empty() && app.selection.is_subset(&app.history_archived);
+        if ui
+            .add_enabled(loaded && selected, egui::Button::new("删除所选"))
+            .on_disabled_hover_text("只能永久删除已归档的记录")
+            .clicked()
+        {
+            app.history_delete = Some(HistoryDeletion::Selected(
+                app.selection.iter().cloned().collect(),
+            ));
+        }
+        if let Some(day) = app
+            .history_days
+            .iter()
+            .find(|day| Some(&day.date) == app.history_date.as_ref())
+            && ui
+                .add_enabled(
+                    loaded && day.archived > 0,
+                    egui::Button::new("删除当天已归档记录"),
+                )
+                .on_disabled_hover_text("当天没有可删除的归档记录")
+                .clicked()
+        {
+            app.history_delete = Some(HistoryDeletion::Day {
+                date: day.date.clone(),
+                count: day.archived,
+            });
+        }
+    });
     if app.history_load.is_some() {
         ui.spinner();
     } else if app.history_rows.is_empty() {
@@ -1229,6 +1334,13 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
 fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     let colors = app.theme.palette(ui.ctx());
     let history = app.navigation == Navigation::History;
+    let focus_id = ui.make_persistent_id(("capture_focus", history));
+    if !history
+        && ui.memory(|memory| memory.focused().is_none() || memory.has_focus(focus_id))
+        && ui.input_mut(clear_capture_pressed)
+    {
+        app.clear_capture_space();
+    }
     if history && app.history_rows.is_empty() {
         return;
     }
@@ -1247,7 +1359,6 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         });
         return;
     }
-    let focus_id = ui.make_persistent_id(("capture_focus", history));
     ui.interact(
         egui::Rect::NOTHING,
         focus_id,
@@ -1602,7 +1713,7 @@ fn capture_cell(ui: &mut egui::Ui, column: usize, contents: impl FnOnce(&mut egu
         });
 }
 
-fn visible_rows<'a>(
+pub(super) fn visible_rows<'a>(
     rows: &'a [Row],
     visible: &[usize],
     archived: &'a [Row],
@@ -1626,7 +1737,7 @@ fn moved_index(len: usize, current: Option<usize>, step: isize) -> Option<usize>
 
 #[cfg(test)]
 mod selection_tests {
-    use super::moved_index;
+    use super::{clear_capture_pressed, egui, moved_index};
 
     #[test]
     fn capture_navigation_does_not_wrap_and_can_start_without_selection() {
@@ -1636,6 +1747,31 @@ mod selection_tests {
         assert_eq!(moved_index(4, Some(0), -1), Some(0));
         assert_eq!(moved_index(4, Some(3), 1), Some(3));
         assert_eq!(moved_index(80, Some(15), 45), Some(60));
+    }
+
+    #[test]
+    fn clear_shortcut_accepts_windows_cut_event_with_ctrl() {
+        for (modifiers, expected) in [
+            (
+                egui::Modifiers {
+                    command: true,
+                    ..egui::Modifiers::CTRL
+                },
+                true,
+            ),
+            (egui::Modifiers::SHIFT, false),
+        ] {
+            let ctx = egui::Context::default();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::ModifiersChanged(modifiers), egui::Event::Cut],
+                    ..Default::default()
+                },
+                |ui| {
+                    assert_eq!(ui.input_mut(clear_capture_pressed), expected);
+                },
+            );
+        }
     }
 }
 
@@ -2036,26 +2172,25 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
             app.confirm_proxy_auto = false;
         }
     }
-    if app.clear_confirmation {
-        let mut open = true;
-        egui::Window::new("清空捕获")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("清空此捕获中的记录？持久化历史将保留。");
-                ui.horizontal(|ui| {
-                    if ui.button("清空").clicked() {
-                        app.clear_capture_space();
-                        app.clear_confirmation = false;
-                    }
-                    if ui.button("取消").clicked() {
-                        app.clear_confirmation = false;
-                    }
-                });
+    if let Some(target) = &app.history_delete {
+        let modal = Theme::modal(ctx, egui::Id::new("delete_history")).show(ctx, |ui| {
+            ui.heading("永久删除历史记录");
+            ui.label(match target {
+                HistoryDeletion::Selected(ids) => {
+                    format!("永久删除所选的 {} 条已归档记录及正文？", ids.len())
+                }
+                HistoryDeletion::Day { date, count } => {
+                    format!("永久删除 {date} 的全部 {count} 条已归档记录及正文？")
+                }
             });
-        if !open {
-            app.clear_confirmation = false;
+            ui.horizontal(|ui| (ui.button("永久删除").clicked(), ui.button("取消").clicked()))
+                .inner
+        });
+        if modal.inner.0 {
+            let target = app.history_delete.take().unwrap();
+            app.send(Command::DeleteHistory(target));
+        } else if modal.inner.1 || modal.should_close() {
+            app.history_delete = None;
         }
     }
 }

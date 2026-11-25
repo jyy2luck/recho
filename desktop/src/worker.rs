@@ -1,6 +1,7 @@
 use eframe::egui;
 use recho_core::native::{
-    CaptureMatches, ConditionSet, DesktopEngine, Detail, Phase, Row, Snapshot,
+    CaptureBatch, CaptureMatches, ConditionSet, DesktopEngine, Detail, HistoryDeletion,
+    HistoryPage, Phase, Snapshot,
 };
 use serde_json::Value;
 use std::{
@@ -17,7 +18,7 @@ use tokio::{
 
 pub type RequestHandle = oneshot::Receiver<Result<Value, String>>;
 pub type DetailHandle = oneshot::Receiver<Result<Detail, String>>;
-pub type HistoryHandle = oneshot::Receiver<Result<Vec<Row>, String>>;
+pub type HistoryHandle = oneshot::Receiver<Result<HistoryPage, String>>;
 pub type MatchHandle = oneshot::Receiver<Result<CaptureMatches, String>>;
 pub type PortHandle = oneshot::Receiver<Result<u16, String>>;
 
@@ -38,7 +39,12 @@ pub enum Command {
         id: String,
         phase: Phase,
     },
-    Clear(String),
+    Archive {
+        group: String,
+        ids: Option<Vec<String>>,
+        close: bool,
+    },
+    DeleteHistory(HistoryDeletion),
     ImportHar(PathBuf),
     ExportHar(PathBuf, Vec<String>),
     MatchCaptures {
@@ -64,10 +70,9 @@ pub enum Command {
     },
     History {
         offset: usize,
-        limit: usize,
         query: String,
-        group: Option<String>,
-        reply: oneshot::Sender<Result<Vec<Row>, String>>,
+        date: Option<String>,
+        reply: oneshot::Sender<Result<HistoryPage, String>>,
     },
 }
 
@@ -75,6 +80,9 @@ pub enum Command {
 pub struct Inbox {
     pub ready: Option<Result<PathBuf, String>>,
     pub snapshot: Option<Snapshot>,
+    pub captures: Option<CaptureBatch>,
+    pub closed_captures: Vec<String>,
+    pub history_changed: bool,
     pub details: [Option<(u64, Result<Detail, String>)>; 2],
     pub error: Option<String>,
     pub breakpoints: Option<Value>,
@@ -86,12 +94,15 @@ pub struct Inbox {
     pub notice: Option<String>,
 }
 impl Inbox {
-    fn snapshot(&mut self, mut next: Snapshot) {
-        // Preserve an unread list update when the following tick only contains status.
-        if next.rows.is_none() {
-            next.rows = self.snapshot.as_mut().and_then(|old| old.rows.take());
+    fn captures(&mut self, next: CaptureBatch) {
+        if let Some(pending) = &mut self.captures
+            && pending.group == next.group
+            && !next.replace
+        {
+            pending.rows.extend(next.rows);
+        } else {
+            self.captures = Some(next);
         }
-        self.snapshot = Some(next);
     }
 }
 
@@ -142,12 +153,12 @@ impl Worker {
                 });
                 publish(&mut |inbox| inbox.ready = Some(Ok(engine.ca_path())));
                 if system_proxy.preferences().auto {
-                    let state = engine.snapshot(None).await;
+                    let state = engine.status().await;
                     if state.running && let Err(error) = system_proxy.enable_automatically(&engine, state.port).await {
                         publish(&mut |inbox| inbox.error = Some(error.clone()));
                     }
                 }
-                let mut revision = None;
+                let mut capture_group = String::new();
                 let mut status = None;
                 let mut breakpoints = Value::Null;
                 let mut workspace_operations = Value::Null;
@@ -179,17 +190,40 @@ impl Worker {
                                             Err(error) => Err(error),
                                         }
                                     } else {
-                                        let was_running = engine.snapshot(revision).await.running;
+                                        let was_running = engine.status().await.running;
                                         match engine.configure(running, intercept_tls).await {
                                             Ok(()) if running && !was_running && system_proxy.preferences().auto => {
-                                                let port = engine.snapshot(revision).await.port;
+                                                let port = engine.status().await.port;
                                                 system_proxy.enable_automatically(&engine, port).await
                                             }
                                             result => result,
                                         }
                                     }
                                 },
-                                Command::Clear(group) => engine.clear_group(&group),
+                                Command::Archive { group, ids, close } => engine.archive_captures(&group, ids.as_deref()).map(|(saved, discarded)| {
+                                    publish(&mut |inbox| {
+                                        if close {
+                                            inbox.closed_captures.push(group.clone());
+                                        }
+                                        inbox.history_changed = true;
+                                        inbox.notice = Some(match (saved, discarded) {
+                                            (0, 0) => "当前捕获已清空".into(),
+                                            (0, n) => format!("已清空 {n} 条无痕记录"),
+                                            (n, 0) => format!("已归档 {n} 条，按 F4 查看"),
+                                            (n, m) => format!("已归档 {n} 条，按 F4 查看。已清空 {m} 条无痕记录"),
+                                        });
+                                    });
+                                }),
+                                Command::DeleteHistory(target) => {
+                                    let result = engine.delete_archived(target);
+                                    publish(&mut |inbox| {
+                                        inbox.history_changed = true;
+                                        if let Ok(count) = &result {
+                                            inbox.notice = Some(format!("已永久删除 {count} 条历史记录"));
+                                        }
+                                    });
+                                    result.map(|_| ())
+                                }
                                 Command::ImportHar(path) => match engine.import_har(&path) {
                                     Ok((group, count)) => {
                                         let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
@@ -220,7 +254,7 @@ impl Worker {
                                             match system_proxy.restore(&engine).await {
                                                 Ok(()) => {
                                                     let mut result = engine.set_port(port).await;
-                                                    let state = engine.snapshot(revision).await;
+                                                    let state = engine.status().await;
                                                     if enabled && state.running {
                                                         result = result.and(system_proxy.set(&engine, true, state.port).await);
                                                     }
@@ -235,7 +269,7 @@ impl Worker {
                                     Ok(())
                                 },
                                 Command::SystemProxy(enabled) => {
-                                    let state = engine.snapshot(revision).await;
+                                    let state = engine.status().await;
                                     if enabled && !state.running {
                                         Err("请先启动调试".into())
                                     } else {
@@ -283,9 +317,9 @@ impl Worker {
                                     }
                                     Ok(())
                                 }
-                                Command::History { offset, limit, query, group, reply } => {
+                                Command::History { offset, query, date, reply } => {
                                     if !reply.is_closed() {
-                                        let _ = reply.send(engine.history_rows(offset, limit, &query, group.as_deref()));
+                                        let _ = reply.send(engine.desktop_history_page(date.as_deref(), offset, &query));
                                         ctx.request_repaint();
                                     }
                                     Ok(())
@@ -305,18 +339,30 @@ impl Worker {
                             }
                         }
                     }
-                    let snapshot = engine.snapshot(revision).await;
+                    let snapshot = engine.status().await;
                     let next_proxy_state = (system_proxy.active(), system_proxy.pending());
                     if proxy_state != next_proxy_state {
                         proxy_state = next_proxy_state;
                         publish(&mut |inbox| inbox.system_proxy = Some(proxy_state));
                     }
                     let next_status = (snapshot.running, snapshot.port, snapshot.intercept_tls, snapshot.history_error.clone(), snapshot.group.clone(), snapshot.incognito, snapshot.enabled_list_filters.clone());
-                    let changed = snapshot.rows.is_some() || status.as_ref() != Some(&next_status);
-                    revision = Some(snapshot.revision);
+                    let changed = status.as_ref() != Some(&next_status);
                     status = Some(next_status);
-                    if changed {
-                        pending.lock().unwrap().snapshot(snapshot);
+                    let captures = engine.capture_batch(&snapshot.group, capture_group != snapshot.group);
+                    if captures.is_ok() {
+                        capture_group.clone_from(&snapshot.group);
+                    }
+                    if changed || !matches!(&captures, Ok(None)) {
+                        let mut inbox = pending.lock().unwrap();
+                        if changed {
+                            inbox.snapshot = Some(snapshot);
+                        }
+                        match captures {
+                            Ok(Some(captures)) => inbox.captures(captures),
+                            Ok(None) => {}
+                            Err(error) => inbox.error = Some(error),
+                        }
+                        drop(inbox);
                         ctx.request_repaint();
                     }
                     let next_breakpoints = engine.pending_breakpoints();
@@ -411,16 +457,14 @@ impl Worker {
     pub fn history(
         &self,
         offset: usize,
-        limit: usize,
         query: String,
-        group: Option<String>,
+        date: Option<String>,
     ) -> Result<HistoryHandle, String> {
         let (reply, receive) = oneshot::channel();
         self.send(Command::History {
             offset,
-            limit,
             query,
-            group,
+            date,
             reply,
         })?;
         Ok(receive)
@@ -447,55 +491,39 @@ mod tests {
     #[test]
     fn mailbox_preserves_unread_rows_and_replaces_them_on_clear() {
         let mut inbox = Inbox::default();
-        let snapshot = |revision, rows| Snapshot {
-            revision,
-            rows,
-            running: true,
-            port: 1234,
-            intercept_tls: false,
-            history_error: None,
+        let batch = |replace, rows| CaptureBatch {
             group: "default".into(),
-            incognito: false,
-            enabled_list_filters: vec![],
+            replace,
+            rows,
         };
-        inbox.snapshot(snapshot(
-            1,
-            Some(vec![Row {
-                id: "one".into(),
-                method: "GET".into(),
-                url: "http://localhost".into(),
-                status: 200,
-                duration_ms: 1,
-                response_bytes: 0,
-                host: "localhost".into(),
-                application: "unknown".into(),
-                application_path: None,
-                server_ip: String::new(),
-                protocol: "HTTP/1.1".into(),
-                content_type: "text/plain".into(),
-                websocket: false,
-                binary: false,
-                error: None,
-                group: "default".into(),
-                started_at: String::new(),
-                incognito: false,
-                list_matches: Default::default(),
-            }]),
-        ));
-        inbox.snapshot(snapshot(1, None));
-        assert_eq!(
-            inbox
-                .snapshot
-                .as_ref()
-                .unwrap()
-                .rows
-                .as_ref()
-                .unwrap()
-                .len(),
-            1
-        );
-        inbox.snapshot(snapshot(2, Some(vec![])));
-        inbox.snapshot(snapshot(2, None));
-        assert!(inbox.snapshot.unwrap().rows.unwrap().is_empty());
+        let row = Row {
+            id: "one".into(),
+            method: "GET".into(),
+            url: "http://localhost".into(),
+            status: 200,
+            duration_ms: 1,
+            response_bytes: 0,
+            host: "localhost".into(),
+            application: "unknown".into(),
+            application_path: None,
+            server_ip: String::new(),
+            protocol: "HTTP/1.1".into(),
+            content_type: "text/plain".into(),
+            websocket: false,
+            binary: false,
+            error: None,
+            group: "default".into(),
+            started_at: String::new(),
+            incognito: false,
+            list_matches: Default::default(),
+        };
+        let mut updated = row.clone();
+        updated.status = 204;
+        inbox.captures(batch(true, [(row.id.clone(), row)].into()));
+        inbox.captures(batch(false, [(updated.id.clone(), updated)].into()));
+        assert_eq!(inbox.captures.as_ref().unwrap().rows["one"].status, 204);
+        assert!(inbox.captures.as_ref().unwrap().replace);
+        inbox.captures(batch(true, Default::default()));
+        assert!(inbox.captures.unwrap().rows.is_empty());
     }
 }
