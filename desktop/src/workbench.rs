@@ -6,7 +6,13 @@ const NEW_HTTP: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::T);
 
 #[cfg(not(target_os = "macos"))]
-pub(super) const MENU_HEIGHT: f32 = 30.0;
+pub(super) const MENU_HEIGHT: f32 = if cfg!(windows) { 32.0 } else { 30.0 };
+#[cfg(not(target_os = "macos"))]
+const MENU_WIDTH: f32 = if cfg!(windows) { 48.0 } else { 46.0 };
+#[cfg(windows)]
+const MENU_FONT_SIZE: f32 = 15.0;
+#[cfg(windows)]
+const MENU_CONTENT_WIDTH: f32 = 138.0;
 
 pub(super) fn icon(code: &str) -> RichText {
     RichText::new(code).font(egui::FontId::new(
@@ -70,6 +76,16 @@ fn menu_item(ui: &mut egui::Ui, label: &str, enabled: bool) -> bool {
         .clicked()
 }
 
+#[cfg(windows)]
+fn top_menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.override_font_id = Some(egui::FontId::proportional(MENU_FONT_SIZE));
+    style.wrap_mode = Some(egui::TextWrapMode::Extend);
+    style.spacing.interact_size.y = 30.0;
+    style.spacing.button_padding = egui::vec2(10.0, 0.0);
+    style.spacing.item_spacing.y = 0.0;
+}
+
 #[cfg(not(target_os = "macos"))]
 fn show_menu_titles<const N: usize>(
     ui: &mut egui::Ui,
@@ -82,9 +98,12 @@ fn show_menu_titles<const N: usize>(
         .iter()
         .position(|&id| egui::Popup::is_id_open(ui.ctx(), id));
     let buttons: [egui::Response; N] = std::array::from_fn(|index| {
+        let title = RichText::new(titles[index]);
+        #[cfg(windows)]
+        let title = title.size(MENU_FONT_SIZE);
         ui.add(
-            egui::Button::new(titles[index])
-                .min_size(egui::vec2(46.0, MENU_HEIGHT))
+            egui::Button::new(title)
+                .min_size(egui::vec2(MENU_WIDTH, MENU_HEIGHT))
                 .selected(active == Some(index))
                 .frame_when_inactive(false)
                 .stroke(egui::Stroke::NONE),
@@ -108,10 +127,16 @@ fn show_menu_titles<const N: usize>(
         }
     }
     if let Some(index) = next {
-        egui::Popup::menu(&buttons[index])
+        let popup = egui::Popup::menu(&buttons[index])
             .id(ids[index])
-            .open_memory(None)
-            .show(|ui| show_contents(index, ui));
+            .open_memory(None);
+        #[cfg(windows)]
+        let popup = popup.style(top_menu_style);
+        popup.show(|ui| {
+            #[cfg(windows)]
+            ui.set_min_width(MENU_CONTENT_WIDTH);
+            show_contents(index, ui);
+        });
     }
     ui.cursor().min.x
 }
@@ -119,32 +144,58 @@ fn show_menu_titles<const N: usize>(
 #[cfg(all(test, not(target_os = "macos")))]
 #[test]
 fn top_menus_switch_on_hover_after_a_click() {
+    for scale in [1.0, 1.25, 1.5] {
+        check_top_menus_at_scale(scale);
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+fn check_top_menus_at_scale(scale: f32) {
     let ctx = egui::Context::default();
     let frame = |events| {
         let mut shown = None;
-        let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(320.0, 200.0),
-                )),
-                events,
-                ..Default::default()
-            },
-            |ui| {
-                shown = None;
-                ui.horizontal(|ui| {
-                    show_menu_titles(ui, ["A", "B", "C"], |index, ui| {
-                        shown = Some(index);
-                        ui.label("Menu content");
-                    });
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(640.0, 240.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&input.viewport_id)
+            .unwrap()
+            .native_pixels_per_point = Some(scale);
+        let mut output = ctx.run_ui(input, |ui| {
+            shown = None;
+            assert_eq!(ui.ctx().pixels_per_point(), scale);
+            ui.horizontal(|ui| {
+                show_menu_titles(ui, ["A", "B", "C"], |index, ui| {
+                    shown = Some(index);
+                    let short = ui.button("MCP");
+                    let long = ui.button("Install the CA certificate on this computer");
+                    #[cfg(windows)]
+                    {
+                        assert_eq!(
+                            ui.style().override_font_id,
+                            Some(egui::FontId::proportional(MENU_FONT_SIZE))
+                        );
+                        let pixel = 1.0 / scale;
+                        assert!(short.rect.height() + pixel >= 30.0);
+                        if !ui.is_sizing_pass() {
+                            assert!(short.rect.width() + pixel >= MENU_CONTENT_WIDTH);
+                        }
+                        assert!(long.rect.width() > MENU_CONTENT_WIDTH);
+                    }
+                    let _ = (short, long);
                 });
-            },
-        );
+            });
+        });
         output.textures_delta.clear();
         shown
     };
-    let middle = egui::pos2(69.0, 15.0);
+    let middle = egui::pos2(MENU_WIDTH * 1.5, MENU_HEIGHT / 2.0);
     let click = |pressed| egui::Event::PointerButton {
         pos: middle,
         button: egui::PointerButton::Primary,
@@ -155,12 +206,19 @@ fn top_menus_switch_on_hover_after_a_click() {
     assert_eq!(frame(vec![egui::Event::PointerMoved(middle)]), None);
     assert_eq!(frame(vec![click(true)]), None);
     assert_eq!(frame(vec![click(false)]), Some(1));
+    assert_eq!(frame(vec![]), Some(1));
     assert_eq!(
-        frame(vec![egui::Event::PointerMoved(egui::pos2(45.0, 15.0))]),
+        frame(vec![egui::Event::PointerMoved(egui::pos2(
+            MENU_WIDTH * 0.5,
+            middle.y,
+        ))]),
         Some(0)
     );
     assert_eq!(
-        frame(vec![egui::Event::PointerMoved(egui::pos2(93.0, 15.0))]),
+        frame(vec![egui::Event::PointerMoved(egui::pos2(
+            MENU_WIDTH * 2.5,
+            middle.y,
+        ))]),
         Some(2)
     );
     frame(vec![egui::Event::Key {
@@ -286,6 +344,8 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             app.load_details();
                         }
                         ui.menu_button("主题", |ui| {
+                            #[cfg(windows)]
+                            ui.set_min_width(MENU_CONTENT_WIDTH);
                             for (color, label) in theme::ThemeColor::OPTIONS {
                                 if ui
                                     .selectable_label(app.theme.color == color, label)
@@ -297,6 +357,8 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             }
                         });
                         ui.menu_button("外观", |ui| {
+                            #[cfg(windows)]
+                            ui.set_min_width(MENU_CONTENT_WIDTH);
                             for (appearance, label) in theme::Appearance::OPTIONS {
                                 if ui
                                     .selectable_label(app.theme.appearance == appearance, label)
@@ -391,6 +453,8 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             }
                         }
                         ui.menu_button("导出 CA 证书", |ui| {
+                            #[cfg(windows)]
+                            ui.set_min_width(MENU_CONTENT_WIDTH);
                             for (format, label) in CertificatePage::EXPORTS {
                                 if ui
                                     .add_enabled(app.ready, egui::Button::new(label))

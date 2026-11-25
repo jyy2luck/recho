@@ -31,6 +31,68 @@ use std::{
 };
 use worker::{Command, DetailHandle, HistoryHandle, RequestHandle, Worker};
 
+#[cfg(windows)]
+fn prefer_windows_fonts(fonts: &mut egui::FontDefinitions, directory: &std::path::Path) {
+    use egui::FontFamily::{Monospace, Proportional};
+
+    if let Ok(bytes) = std::fs::read(directory.join("msyh.ttc")) {
+        // Face 0 of the collection is Microsoft YaHei Regular.
+        fonts.font_data.insert(
+            "msyh".into(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(Proportional)
+            .or_default()
+            .insert(0, "msyh".into());
+        fonts
+            .families
+            .entry(Monospace)
+            .or_default()
+            .push("msyh".into());
+    }
+    if let Ok(bytes) = std::fs::read(directory.join("segoeui.ttf")) {
+        fonts.font_data.insert(
+            "segoe-ui".into(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(Proportional)
+            .or_default()
+            .insert(0, "segoe-ui".into());
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_fonts_preserve_builtin_fallbacks() {
+    let directory = tempfile::tempdir().unwrap();
+    let defaults = egui::FontDefinitions::default();
+    let mut fonts = defaults.clone();
+    prefer_windows_fonts(&mut fonts, directory.path());
+    assert_eq!(fonts.families, defaults.families);
+
+    let fixture = include_bytes!("../assets/fonts/DroidSansFallback.ttf");
+    for name in ["segoeui.ttf", "msyh.ttc"] {
+        std::fs::write(directory.path().join(name), fixture).unwrap();
+    }
+    prefer_windows_fonts(&mut fonts, directory.path());
+    let proportional = &fonts.families[&egui::FontFamily::Proportional];
+    assert_eq!(&proportional[..2], ["segoe-ui", "msyh"]);
+    assert_eq!(
+        &proportional[2..],
+        defaults.families[&egui::FontFamily::Proportional]
+    );
+    let monospace = &fonts.families[&egui::FontFamily::Monospace];
+    assert_eq!(
+        &monospace[..monospace.len() - 1],
+        defaults.families[&egui::FontFamily::Monospace]
+    );
+    assert_eq!(monospace.last().unwrap(), "msyh");
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Navigation {
     Capture,
@@ -192,6 +254,10 @@ impl Recho {
         };
         theme.apply(&cc.egui_ctx);
         let mut fonts = egui::FontDefinitions::default();
+        #[cfg(windows)]
+        if let Some(windows) = std::env::var_os("SystemRoot") {
+            prefer_windows_fonts(&mut fonts, &PathBuf::from(windows).join("Fonts"));
+        }
         fonts.font_data.insert(
             "cjk".into(),
             std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
