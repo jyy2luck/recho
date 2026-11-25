@@ -1,4 +1,4 @@
-use super::{Content, FormattedJson, TextRows, formatted_json, hex_row};
+use super::{Content, FormattedJson, TextRows, formatted_json, hex_row, show_raw_headers};
 use crate::{BodyFormat, files, theme::Theme};
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
@@ -122,13 +122,10 @@ impl View {
             ui.colored_label(ui.visuals().warn_fg_color, notice);
         }
         if let Some(headers) = raw_headers {
-            egui::ScrollArea::both()
-                .id_salt("raw_response_headers")
-                .max_height(70.0)
-                .min_scrolled_height(0.0)
-                .show(ui, |ui| {
-                    ui.monospace(headers);
-                });
+            show_raw_headers(ui, headers, !bytes.is_empty());
+            if bytes.is_empty() {
+                return;
+            }
         }
         match format {
             BodyFormat::Tree => match self.tree.as_mut().expect("tree format was prepared") {

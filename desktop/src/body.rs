@@ -112,6 +112,27 @@ pub fn hex_row(bytes: &[u8], row: usize) -> String {
     text
 }
 
+pub(super) fn show_raw_headers(ui: &mut egui::Ui, headers: &str, has_body: bool) {
+    if headers.is_empty() {
+        return;
+    }
+    let height = ui.available_height();
+    let body_space = if has_body {
+        let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+        (3.0 * (row_height + ui.spacing().item_spacing.y)).min(height / 2.0)
+    } else {
+        0.0
+    };
+    egui::ScrollArea::both()
+        .id_salt("raw_message_headers")
+        .max_height(height - body_space)
+        .min_scrolled_height(0.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(headers).monospace()).extend());
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

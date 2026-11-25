@@ -2139,6 +2139,13 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
     if let Some(notice) = &viewer.detail.notice {
         ui.colored_label(colors.warning, notice);
     }
+    if panel.tab == MessageTab::Raw {
+        let has_body = !viewer.content.bytes().is_empty();
+        body::show_raw_headers(ui, &viewer.detail.headers, has_body);
+        if !has_body {
+            return;
+        }
+    }
     if matches!(panel.format, BodyFormat::Json | BodyFormat::Tree) {
         let parsed = viewer.structured.get_or_insert_with(|| {
             let bytes = viewer.content.bytes();
@@ -2169,14 +2176,6 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
             Content::Binary(_) => 0,
         }
     };
-    if panel.tab == MessageTab::Raw {
-        egui::ScrollArea::both()
-            .id_salt(("raw_headers", index))
-            .max_height(70.0)
-            .show(ui, |ui| {
-                ui.monospace(&viewer.detail.headers);
-            });
-    }
     egui::ScrollArea::both()
         .id_salt(("body", index, &viewer.detail.id, hex))
         .auto_shrink([false, false])
