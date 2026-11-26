@@ -367,7 +367,7 @@ impl McpUi {
                         .clicked()
                     {
                         self.page = Some(Page::Config(client));
-                        self.http = false;
+                        self.http = client == Client::Codex;
                         self.copied = None;
                     }
                     if index % 3 == 2 {
@@ -422,7 +422,7 @@ impl McpUi {
             |ui| {
                 ui.heading(format!("将 Recho 连接到 {}", client.name()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    for (http, title) in [(true, "HTTP"), (false, "Stdio")] {
+                    for (http, title) in [(false, "Stdio"), (true, "HTTP")] {
                         let selected = self.http == http;
                         let text = egui::RichText::new(title).color(if selected {
                             colors.bg
