@@ -78,6 +78,46 @@ pub(super) fn control_row(ui: &mut egui::Ui) {
     }
 }
 
+pub(super) fn paint_workbench_tab(
+    ui: &mut egui::Ui,
+    mut frame: egui::containers::frame::Prepared,
+    selected: bool,
+    title: &egui::Response,
+    close: Option<&egui::Response>,
+) {
+    let rect = frame.allocate_space(ui).rect;
+    let hovered = ui.rect_contains_pointer(rect);
+    frame.frame.corner_radius = egui::CornerRadius::same(CONTROL_RADIUS);
+    if selected || hovered {
+        frame.frame.fill = ui.visuals().selection.bg_fill;
+    }
+    frame.paint(ui);
+
+    let painter = ui.painter();
+    let focus_stroke = ui.visuals().widgets.hovered.bg_stroke;
+    if hovered || title.has_focus() {
+        painter.rect_stroke(rect, CONTROL_RADIUS, focus_stroke, egui::StrokeKind::Inside);
+    } else {
+        if !selected {
+            let line = Theme::current_palette(ui.ctx()).line;
+            painter.rect_stroke(
+                rect,
+                CONTROL_RADIUS,
+                egui::Stroke::new(1.0, line),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(close) = close.filter(|button| button.has_focus()) {
+            painter.rect_stroke(
+                close.rect,
+                CONTROL_RADIUS,
+                focus_stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
 pub(super) fn dialog_header(
     ui: &mut egui::Ui,
     title: impl Into<egui::RichText>,
@@ -488,6 +528,51 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workbench_tab_hover_highlights_the_whole_tab() {
+        let ctx = egui::Context::default();
+        let theme = Theme {
+            color: ThemeColor::Purple,
+            appearance: Appearance::Light,
+        };
+        theme.apply(&ctx);
+        let render = |pointer: Option<egui::Pos2>| {
+            let mut title_rect = egui::Rect::NOTHING;
+            let mut close_rect = egui::Rect::NOTHING;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.horizontal(|ui| {
+                        let mut frame = egui::Frame::new().begin(ui);
+                        let title = frame.content_ui.button("Tab");
+                        let close = frame.content_ui.button("×");
+                        title_rect = title.rect;
+                        close_rect = close.rect;
+                        paint_workbench_tab(ui, frame, false, &title, Some(&close));
+                    });
+                },
+            );
+            (output, title_rect, close_rect)
+        };
+        let (idle, title, close) = render(None);
+        let fill = theme.palette(&ctx).selected;
+        let has_hover_fill = |mut output: egui::FullOutput| {
+            output.textures_delta.clear();
+            output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == fill
+                    && rect.rect.contains(title.center()) && rect.rect.contains(close.center()))
+            })
+        };
+        assert!(!has_hover_fill(idle));
+        let gap = egui::pos2((title.right() + close.left()) * 0.5, title.center().y);
+        for pointer in [title.center(), gap, close.center()] {
+            assert!(has_hover_fill(render(Some(pointer)).0), "{pointer:?}");
+        }
+    }
 
     #[test]
     fn missing_and_legacy_preferences_load_and_round_trip() {

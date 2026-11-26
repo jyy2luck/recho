@@ -1,6 +1,9 @@
 use crate::{
     body::{Content, hex_row, show_structured},
-    theme::{CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header, input_text},
+    theme::{
+        CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header, input_text,
+        paint_workbench_tab,
+    },
     worker::{DetailHandle, RequestHandle, Worker},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -731,15 +734,13 @@ impl Composer {
         let mut close = None;
         let mut duplicate = None;
         let mut save = None;
-        let accent = Theme::current_palette(ui.ctx()).accent;
+        let colors = Theme::current_palette(ui.ctx());
         for (index, request) in requests.iter().enumerate() {
             let tab_id = text(request, "id");
             ui.push_id(tab_id, |ui| {
                 let selected = tab_id == self.active;
                 let unsaved = changes_since_save(document, request).unwrap_or(true);
-                let radius = 5;
                 let mut frame = egui::Frame::new()
-                    .corner_radius(radius)
                     .inner_margin(egui::Margin {
                         left: 7,
                         right: 4,
@@ -756,7 +757,7 @@ impl Composer {
                     let (rect, painter) = frame
                         .content_ui
                         .allocate_painter(egui::Vec2::splat(6.0), egui::Sense::hover());
-                    painter.circle_filled(rect.rect.center(), 2.5, accent);
+                    painter.circle_filled(rect.rect.center(), 2.5, colors.accent);
                     response
                         .ctx
                         .accesskit_node_builder(response.id, |node| node.set_description("未保存"));
@@ -767,25 +768,7 @@ impl Composer {
                         .frame(false)
                         .min_size([22.0, 22.0].into()),
                 );
-                let tab_rect = frame.allocate_space(ui).rect;
-                let hovered = ui.rect_contains_pointer(tab_rect);
-                if selected || hovered {
-                    frame.frame.fill = ui.visuals().selection.bg_fill;
-                }
-                frame.paint(ui);
-                let outline = if hovered || response.has_focus() {
-                    Some(tab_rect)
-                } else {
-                    close_button.has_focus().then_some(close_button.rect)
-                };
-                if let Some(outline) = outline {
-                    ui.painter().rect_stroke(
-                        outline,
-                        radius,
-                        ui.visuals().widgets.hovered.bg_stroke,
-                        egui::StrokeKind::Inside,
-                    );
-                }
+                paint_workbench_tab(ui, frame, selected, &response, Some(&close_button));
                 close_button
                     .ctx
                     .accesskit_node_builder(close_button.id, |node| node.set_label("关闭请求"));

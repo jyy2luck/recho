@@ -1,6 +1,8 @@
 use super::*;
 use crate::certificate_ui::Page as CertificatePage;
-use crate::theme::{CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header};
+use crate::theme::{
+    CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header, paint_workbench_tab,
+};
 use egui_extras::{Column, TableBuilder};
 
 const NEW_HTTP: egui::KeyboardShortcut =
@@ -1211,20 +1213,24 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
     for id in groups {
         let space = app.spaces.items.get_mut(&id).unwrap();
         let current = id == app.spaces.group;
+        let selected = current && !app.composer.active() && app.navigation != Navigation::History;
         let label = if current {
             format!("◉  {} ({})", space.name, app.rows.len())
         } else {
             space.name.clone()
         };
-        let response = ui.add(
+        let mut frame = egui::Frame::new().begin(ui);
+        let response = frame.content_ui.add(
             egui::Button::selectable(
-                current && !app.composer.active() && app.navigation != Navigation::History,
+                selected,
                 RichText::new(label).color(if current {
                     colors.accent
                 } else {
                     ui.visuals().text_color()
                 }),
             )
+            .fill(egui::Color32::TRANSPARENT)
+            .stroke(egui::Stroke::NONE)
             .min_size(egui::vec2(100.0, CONTROL_HEIGHT))
             .wrap_mode(egui::TextWrapMode::Extend),
         );
@@ -1248,19 +1254,25 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
         if response.clicked() {
             next = Some(id.clone());
         }
-        if id != "default" {
-            let close = ui.add(
+        let close = if id != "default" {
+            let close = frame.content_ui.add(
                 egui::Button::new("×")
                     .min_size(egui::vec2(26.0, CONTROL_HEIGHT))
-                    .frame_when_inactive(false),
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE),
             );
             close.ctx.accesskit_node_builder(close.id, |node| {
                 node.set_label(format!("关闭 {}", space.name))
             });
-            if close.on_hover_text("关闭会话标签").clicked() {
+            let close = close.on_hover_text("关闭会话标签");
+            if close.clicked() {
                 remove = Some(id.clone());
             }
-        }
+            Some(close)
+        } else {
+            None
+        };
+        paint_workbench_tab(ui, frame, selected, &response, close.as_ref());
     }
     if let Some(id) = remove {
         app.close_capture_space(&id);
@@ -1574,7 +1586,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .column(Column::initial(48.0).clip(true))
                 .column(Column::initial(36.0).clip(true))
-                .column(Column::initial(62.0).clip(true))
+                .column(Column::initial(80.0).clip(true))
                 .column(
                     Column::remainder()
                         .at_least(230.0)
@@ -1609,7 +1621,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                     {
                         row.col(|ui| {
                             capture_cell(ui, index, |ui| {
-                                let title = RichText::new(*title).size(12.0);
+                                let title = RichText::new(*title);
                                 if history {
                                     ui.add(egui::Label::new(title).truncate());
                                     return;
@@ -1686,13 +1698,11 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         for (index, text) in cells.into_iter().enumerate() {
                             table_row.col(|ui| {
                                 capture_cell(ui, index, |ui| {
-                                    let mut text =
-                                        RichText::new(text).size(12.0).color(if index == 5 {
-                                            color
-                                        } else {
-                                            marked_color
-                                                .unwrap_or_else(|| ui.visuals().text_color())
-                                        });
+                                    let mut text = RichText::new(text).color(if index == 5 {
+                                        color
+                                    } else {
+                                        marked_color.unwrap_or(colors.text)
+                                    });
                                     if highlight == Some("划线") {
                                         text = text.strikethrough();
                                     }
