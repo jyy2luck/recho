@@ -150,7 +150,7 @@ impl NetworkSection {
         Self::Reverse,
     ];
 
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::Ssl => "SSL 配置",
             Self::Access => "访问控制",

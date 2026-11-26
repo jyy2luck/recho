@@ -24,7 +24,7 @@ pub(super) enum RuleCategory {
 impl RuleCategory {
     const CATEGORIES: [Self; 4] = [Self::All, Self::Rewrite, Self::Script, Self::Breakpoint];
 
-    fn label(self) -> &'static str {
+    pub(super) fn label(self) -> &'static str {
         match self {
             Self::All => "全部",
             Self::Rewrite => "重写",

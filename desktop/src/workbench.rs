@@ -415,15 +415,28 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                         }
                     }),
                     ("调试", |app, ui| {
+                        use crate::{network_ui::NetworkSection, rules_ui::RuleCategory};
+
                         if ui
-                            .button(if app.running {
-                                "停止调试  ⌘/Ctrl+G"
-                            } else {
-                                "开始调试  ⌘/Ctrl+G"
-                            })
+                            .add_enabled(
+                                app.ready,
+                                egui::Button::new(if app.running {
+                                    "停止调试"
+                                } else {
+                                    "启动调试"
+                                })
+                                .shortcut_text("Ctrl+G"),
+                            )
                             .clicked()
                         {
                             app.toggle_capture();
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(app.ready, egui::Button::new("清空捕获"))
+                            .clicked()
+                        {
+                            app.clear_capture_space();
                             ui.close();
                         }
                         let mut incognito = app.spaces.incognito;
@@ -435,10 +448,46 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             .changed()
                         {
                             app.set_incognito(incognito);
-                        }
-                        if ui.button("清空捕获").clicked() {
-                            app.clear_capture_space();
                             ui.close();
+                        }
+                        ui.separator();
+                        for section in [
+                            NetworkSection::Ssl,
+                            NetworkSection::Mirror,
+                            NetworkSection::Gateway,
+                        ] {
+                            if ui.button(section.label()).clicked() {
+                                app.open_network(section);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        for category in [
+                            RuleCategory::Rewrite,
+                            RuleCategory::Breakpoint,
+                            RuleCategory::Script,
+                        ] {
+                            if ui.button(category.label()).clicked() {
+                                app.rules.open(category);
+                                ui.close();
+                            }
+                        }
+                        if ui
+                            .add_enabled(
+                                app.spaces.current().is_some(),
+                                egui::Button::new("自动高亮"),
+                            )
+                            .clicked()
+                        {
+                            app.edit_highlights();
+                            ui.close();
+                        }
+                        ui.separator();
+                        for section in [NetworkSection::Reverse, NetworkSection::Access] {
+                            if ui.button(section.label()).clicked() {
+                                app.open_network(section);
+                                ui.close();
+                            }
                         }
                     }),
                     ("代理", |app, ui| {
