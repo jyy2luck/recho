@@ -1087,6 +1087,11 @@ fn windows_wgpu_options() -> eframe::WgpuConfiguration {
         descriptor
     });
     eframe::WgpuConfiguration {
+        // Prefer the latest frame when the window size changes faster than the display refreshes.
+        surface: eframe::egui_wgpu::SurfaceConfig {
+            present_mode: wgpu::PresentMode::Mailbox,
+            ..eframe::egui_wgpu::SurfaceConfig::HIGH_THROUGHPUT
+        },
         wgpu_setup: setup.into(),
         ..Default::default()
     }
