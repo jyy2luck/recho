@@ -4,6 +4,11 @@ use crate::worker::{RequestHandle, Worker};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use eframe::egui;
 use serde_json::{Value, json};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
+use toml_edit::{DocumentMut, Item, Table};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Client {
@@ -96,8 +101,9 @@ pub(super) struct McpUi {
     all_tools: bool,
     editor: Option<TokenEdit>,
     confirm_remote: bool,
+    confirm_codex: Option<(PathBuf, String)>,
     error: Option<String>,
-    copied: Option<&'static str>,
+    feedback: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -122,7 +128,7 @@ impl McpUi {
         self.page = Some(Page::Clients);
         self.access = None;
         self.error = None;
-        self.copied = None;
+        self.feedback = None;
     }
 
     pub(super) fn open_tokens(&mut self) {
@@ -142,9 +148,12 @@ impl McpUi {
         if self.reply.is_some() && (self.editor.is_some() || self.confirm_remote) {
             return;
         }
-        self.copied = None;
+        self.feedback = None;
         self.error = None;
-        if self.editor.take().is_some() || std::mem::take(&mut self.confirm_remote) {
+        if self.editor.take().is_some()
+            || std::mem::take(&mut self.confirm_remote)
+            || self.confirm_codex.take().is_some()
+        {
             return;
         }
         if std::mem::take(&mut self.token_list) {
@@ -214,7 +223,7 @@ impl McpUi {
         body: Value,
         kind: Reply,
     ) {
-        self.copied = None;
+        self.feedback = None;
         match worker.request(method, path, body) {
             Ok(reply) => {
                 self.reply = Some((kind, reply));
@@ -268,6 +277,27 @@ impl McpUi {
                         self.back();
                     }
                 });
+            } else if let Some((path, snippet)) = &self.confirm_codex {
+                ui.heading("将 Recho 写入 Codex 配置");
+                ui.label(path.display().to_string());
+                ui.label("将添加或替换 [mcp_servers.recho] 段。访问令牌会以明文保存在此文件中。");
+                let (save, cancel) = footer(ui, |ui| {
+                    let save = ui.button("同意并写入").clicked();
+                    let cancel = ui.button("取消").clicked();
+                    (save, cancel)
+                });
+                if save {
+                    self.error = match write_codex_config(path, snippet) {
+                        Ok(()) => {
+                            self.feedback = Some("已写入 Codex 配置。");
+                            None
+                        }
+                        Err(error) => Some(error),
+                    };
+                    self.confirm_codex = None;
+                } else if cancel {
+                    self.back();
+                }
             } else if self.token_list {
                 self.tokens(ui, worker, ready);
             } else {
@@ -283,8 +313,8 @@ impl McpUi {
             if let Some(error) = &self.error {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
-            if let Some(copied) = self.copied {
-                ui.weak(copied);
+            if let Some(feedback) = self.feedback {
+                ui.weak(feedback);
             }
         });
         if dialog.should_close() {
@@ -368,7 +398,7 @@ impl McpUi {
                     {
                         self.page = Some(Page::Config(client));
                         self.http = client == Client::Codex;
-                        self.copied = None;
+                        self.feedback = None;
                     }
                     if index % 3 == 2 {
                         ui.end_row();
@@ -388,7 +418,7 @@ impl McpUi {
     fn manage_tokens(&mut self, ui: &mut egui::Ui, worker: &Worker, ready: bool) {
         if ui.button("管理访问令牌").clicked() {
             self.token_list = true;
-            self.copied = None;
+            self.feedback = None;
             if ready && self.reply.is_none() {
                 self.load(worker);
             }
@@ -438,14 +468,39 @@ impl McpUi {
                         };
                         if ui.add(button).clicked() && !selected {
                             self.http = http;
-                            self.copied = None;
+                            self.feedback = None;
                         }
                     }
                 });
             },
         );
         ui.separator();
-        ui.weak(client.instructions());
+        let codex_http = client == Client::Codex && self.http;
+        let codex_path = codex_http.then(codex_config_path).flatten();
+        if codex_http {
+            ui.weak(
+                "复制下方配置并保存到 Codex 配置文件。已有 [mcp_servers.recho] 时，请替换该段。",
+            );
+            let path = codex_path
+                .as_deref()
+                .unwrap_or(Path::new("~/.codex/config.toml"));
+            let directory = codex_path.as_deref().and_then(Path::parent);
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(path.display().to_string()).monospace())
+                        .wrap(),
+                );
+                if ui
+                    .add_enabled(directory.is_some(), egui::Button::new("打开配置文件夹"))
+                    .clicked()
+                    && let Some(directory) = directory
+                {
+                    self.error = open_config_folder(directory).err();
+                }
+            });
+        } else {
+            ui.weak(client.instructions());
+        }
         self.availability(ui, worker, ready);
         let access = self.access.clone().unwrap_or(Value::Null);
         let tokens = access["tokens"].as_array().map_or(&[][..], Vec::as_slice);
@@ -471,7 +526,7 @@ impl McpUi {
                                 )
                                 .changed()
                             {
-                                self.copied = None;
+                                self.feedback = None;
                             }
                         }
                     });
@@ -488,7 +543,7 @@ impl McpUi {
                                 .selectable_value(&mut self.all_tools, true, "all · 全部工具")
                                 .changed()
                         {
-                            self.copied = None;
+                            self.feedback = None;
                         }
                     });
                 ui.end_row();
@@ -508,7 +563,7 @@ impl McpUi {
                             )
                             .changed()
                         {
-                            self.copied = None;
+                            self.feedback = None;
                         }
                         for addr in access["addresses"]
                             .as_array()
@@ -525,7 +580,7 @@ impl McpUi {
                                 .clicked()
                             {
                                 self.endpoint_host = addr.to_owned();
-                                self.copied = None;
+                                self.feedback = None;
                             }
                         }
                     });
@@ -568,7 +623,7 @@ impl McpUi {
                             &command,
                             can_copy,
                             "复制命令",
-                            &mut self.copied,
+                            &mut self.feedback,
                         );
                     }
                     code_block(
@@ -577,14 +632,14 @@ impl McpUi {
                         &config.text(),
                         can_copy,
                         "复制配置",
-                        &mut self.copied,
+                        &mut self.feedback,
                     );
                     let (title, value) = if self.http {
                         ("服务器 URL", config.endpoint())
                     } else {
                         ("辅助程序路径", path.unwrap_or_default())
                     };
-                    code_block(ui, title, value, true, "复制地址或路径", &mut self.copied);
+                    code_block(ui, title, value, true, "复制地址或路径", &mut self.feedback);
                 } else {
                     ui.label("等待代理端口或 Stdio 辅助程序可用。");
                 }
@@ -595,14 +650,31 @@ impl McpUi {
         if self.http && access["remoteEnabled"] != true {
             ui.weak("其他设备连接时，请在服务设置中启用远程访问并选择连接地址。");
         }
+        if codex_http {
+            ui.weak(
+                "令牌会以明文保存在配置中。保存后请完全退出并重新打开 Codex，再用 /mcp 查看连接。",
+            );
+        }
         footer(ui, |ui| {
             if ui.button("完成").clicked() {
                 self.page = None;
                 self.access = None;
-                self.copied = None;
+                self.feedback = None;
             }
             if ui.button("返回").clicked() {
                 self.back();
+            }
+            if codex_http {
+                let target = codex_path.zip(config.as_ref()).filter(|_| can_copy);
+                if ui
+                    .add_enabled(target.is_some(), egui::Button::new("写入本机 Codex 配置…"))
+                    .clicked()
+                    && let Some((path, config)) = target
+                {
+                    self.error = None;
+                    self.feedback = None;
+                    self.confirm_codex = Some((path, config.text()));
+                }
             }
             if matches!(client, Client::Cursor | Client::VsCode) {
                 let link = config
@@ -666,7 +738,7 @@ impl McpUi {
                                             }
                                             if ui.button("复制").clicked() {
                                                 ui.ctx().copy_text(credential.into());
-                                                self.copied = Some("已复制令牌");
+                                                self.feedback = Some("已复制令牌");
                                             }
                                             if ui.button("重命名").clicked() {
                                                 edit = Some(TokenEdit::Rename {
@@ -699,7 +771,7 @@ impl McpUi {
         });
         if edit.is_some() {
             self.error = None;
-            self.copied = None;
+            self.feedback = None;
             self.editor = edit;
         }
     }
@@ -835,6 +907,112 @@ fn remote_patch(enabled: bool, expected: bool) -> Value {
     json!({"mcpRemoteEnabled": enabled, "_expected": {"mcpRemoteEnabled": expected}})
 }
 
+fn codex_config_path() -> Option<PathBuf> {
+    let directory = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".codex")))?;
+    std::path::absolute(directory.join("config.toml")).ok()
+}
+
+fn open_config_folder(directory: &Path) -> Result<(), String> {
+    match fs::metadata(directory) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err("Codex 配置文件夹路径指向一个文件。".into()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(
+                "Codex 配置文件夹尚未创建。可先启动 Codex，或使用「写入本机 Codex 配置…」。".into(),
+            );
+        }
+        Err(error) => return Err(format!("无法访问 Codex 配置文件夹：{error}")),
+    }
+    #[cfg(windows)]
+    let opened = {
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr::null;
+        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+        let path: Vec<_> = directory.as_os_str().encode_wide().chain([0]).collect();
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                null(),
+                path.as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            ) as isize
+                > 32
+        }
+    };
+    #[cfg(not(windows))]
+    let opened = url::Url::from_directory_path(directory).is_ok_and(|url| open_install_link(&url));
+    opened
+        .then_some(())
+        .ok_or_else(|| "无法打开 Codex 配置文件夹，可复制上方路径手动打开。".into())
+}
+
+fn write_codex_config(path: &Path, snippet: &str) -> Result<(), String> {
+    let path = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_symlink() => {
+            fs::canonicalize(path).map_err(|error| format!("无法解析 Codex 配置路径：{error}"))?
+        }
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => return Err(format!("无法读取 Codex 配置：{error}")),
+    };
+    let read = || match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => fs::read_to_string(&path).map(Some),
+        Ok(_) => Err(io::Error::other("配置路径不是普通文件")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    let original = read().map_err(|error| format!("无法读取 Codex 配置：{error}"))?;
+    let mut document = original
+        .as_deref()
+        .unwrap_or_default()
+        .parse::<DocumentMut>()
+        .map_err(|_| "Codex 配置不是有效的 TOML。请先修复原文件，再重试。")?;
+    let mut snippet = snippet
+        .parse::<DocumentMut>()
+        .map_err(|_| "无法解析 Recho 配置片段。")?;
+    let mut entry = snippet
+        .get_mut("mcp_servers")
+        .and_then(Item::as_table_mut)
+        .and_then(|servers| servers.remove("recho"))
+        .and_then(|entry| entry.into_table().ok())
+        .ok_or("Recho 配置片段缺少 mcp_servers.recho。")?;
+    let servers = document.entry("mcp_servers").or_insert_with(|| {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        Item::Table(table)
+    });
+    let group_position = servers.as_table().and_then(Table::position);
+    let servers = servers
+        .as_table_like_mut()
+        .ok_or("Codex 配置中的 mcp_servers 不是表。请手动合并配置。")?;
+    let previous = servers.get("recho").and_then(Item::as_table);
+    // Table positions belong to the destination document.
+    entry.set_position(
+        previous
+            .and_then(Table::position)
+            .filter(|position| group_position.is_none_or(|group| *position > group)),
+    );
+    if let Some(previous) = previous {
+        *entry.decor_mut() = previous.decor().clone();
+    }
+    servers.insert("recho", Item::Table(entry));
+    if read().map_err(|error| format!("无法读取 Codex 配置：{error}"))? != original {
+        return Err("Codex 配置刚被修改，请重新确认后再试。".into());
+    }
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)
+            .map_err(|error| format!("无法创建 Codex 配置目录：{error}"))?;
+    }
+    recho_core::native::write_local_file(&path, document.to_string().as_bytes())
+        .map_err(|error| format!("无法写入 Codex 配置：{error}"))
+}
+
 struct Config {
     client: Client,
     http: bool,
@@ -947,19 +1125,6 @@ impl Config {
                 Client::Gemini => Some(format!(
                     "gemini mcp add --transport http --header {header} recho {url}"
                 )),
-                Client::Codex => {
-                    let token =
-                        label(&self.server["headers"]["Authorization"]).strip_prefix("Bearer ")?;
-                    let setup = if cfg!(windows) {
-                        "$env:RECHO_TOKEN = "
-                    } else {
-                        "export RECHO_TOKEN="
-                    };
-                    Some(format!(
-                        "{setup}{}\ncodex mcp add recho --url {url} --bearer-token-env-var RECHO_TOKEN",
-                        shell_quote(token)
-                    ))
-                }
                 _ => None,
             }
         } else {
@@ -1121,12 +1286,7 @@ mod tests {
         }
         let codex = fixture(Client::Codex, true);
         assert!(codex.text().contains("Bearer fixture"));
-        assert!(
-            codex
-                .command()
-                .unwrap()
-                .contains("--bearer-token-env-var RECHO_TOKEN")
-        );
+        assert!(codex.command().is_none());
         let cursor = fixture(Client::Cursor, false);
         let link = cursor.install_link().unwrap();
         let payload = link
@@ -1139,6 +1299,127 @@ mod tests {
         assert_eq!(decoded, cursor.server);
         let vscode = fixture(Client::VsCode, true).install_link().unwrap();
         assert!(vscode.query().unwrap().contains("Bearer%20fixture"));
+    }
+
+    #[test]
+    fn codex_http_config_creates_and_replaces_only_recho() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(".codex").join("config.toml");
+        let config_for_port = |port| {
+            Config::new(
+                Client::Codex,
+                true,
+                "127.0.0.1",
+                port,
+                "all",
+                None,
+                "fixture",
+            )
+            .unwrap()
+            .text()
+        };
+        let snippet = config_for_port(9988);
+        let snippet = snippet.as_str();
+
+        write_codex_config(&path, snippet).unwrap();
+        let initial = fs::read_to_string(&path).unwrap();
+        let initial = initial.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            initial["mcp_servers"]["recho"]["http_headers"]["Authorization"].as_str(),
+            Some("Bearer fixture")
+        );
+
+        let previous = "# Codex preferences\nmodel = 'fixture-model'\n\n[mcp_servers.recho]\ncommand = 'recho'\nargs = ['--mcp']\nenv = { RECHO_TOKEN = 'old' }\n\n[mcp_servers.other]\ncommand = 'other' # Keep this comment\n";
+        fs::write(&path, previous).unwrap();
+        write_codex_config(&path, snippet).unwrap();
+        let updated = fs::read_to_string(&path).unwrap();
+        let config = updated.parse::<DocumentMut>().unwrap();
+        assert_eq!(config["model"].as_str(), Some("fixture-model"));
+        assert_eq!(
+            config["mcp_servers"]["other"]["command"].as_str(),
+            Some("other")
+        );
+        assert!(updated.contains("# Codex preferences"));
+        assert!(updated.contains("# Keep this comment"));
+        assert!(config["mcp_servers"]["recho"].get("command").is_none());
+        assert_eq!(
+            config["mcp_servers"]["recho"]["url"].as_str(),
+            Some("http://127.0.0.1:9988/mcp?scope=all")
+        );
+        write_codex_config(&path, snippet).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), updated);
+
+        write_codex_config(&path, &config_for_port(9090)).unwrap();
+        let moved = fs::read_to_string(&path).unwrap();
+        let config = moved.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            config["mcp_servers"]["recho"]["url"].as_str(),
+            Some("http://127.0.0.1:9090/mcp?scope=all")
+        );
+        assert_eq!(moved, updated.replace(":9988/mcp", ":9090/mcp"));
+    }
+
+    #[test]
+    fn codex_http_config_keeps_recho_with_the_mcp_servers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let snippet = "[mcp_servers.recho]\nurl = 'http://127.0.0.1:9090/mcp'";
+        let group = "[mcp_servers]\n\n[mcp_servers.other]\ncommand = 'other'\n\n[mcp_servers.other.env]\nVALUE = 'keep'\n\n";
+        let previous =
+            "# Recho comment\n[mcp_servers.recho]\nurl = 'http://127.0.0.1:9988/mcp'\n\n";
+        for (layout, before) in [
+            (format!("{group}{previous}"), "[mcp_servers.other.env]"),
+            (format!("{previous}{group}"), "[mcp_servers]"),
+            (group.to_owned(), "[mcp_servers.other.env]"),
+        ] {
+            fs::write(
+                &path,
+                format!("[model_providers.demo]\nname = 'Demo'\n\n{layout}[projects.demo]\ntrust_level = 'trusted'\n"),
+            ).unwrap();
+            write_codex_config(&path, snippet).unwrap();
+            let updated = fs::read_to_string(&path).unwrap();
+            let recho = updated.find("[mcp_servers.recho]").unwrap();
+            assert!(updated.find(before).unwrap() < recho);
+            assert!(recho < updated.find("[projects.demo]").unwrap());
+            if layout.contains("# Recho comment") {
+                assert!(updated.contains("# Recho comment\n[mcp_servers.recho]"));
+            }
+        }
+    }
+
+    #[test]
+    fn codex_http_config_leaves_invalid_files_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let snippet = "[mcp_servers.recho]\nurl = 'http://127.0.0.1:9988/mcp'";
+        for original in ["invalid = [", "mcp_servers = 42"] {
+            fs::write(&path, original).unwrap();
+            assert!(write_codex_config(&path, snippet).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn opening_codex_config_folder_reports_a_missing_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing");
+        assert!(open_config_folder(&path).unwrap_err().contains("尚未创建"));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cancelling_codex_confirmation_does_not_write() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let mut ui = McpUi {
+            page: Some(Page::Config(Client::Codex)),
+            confirm_codex: Some((path.clone(), String::new())),
+            ..Default::default()
+        };
+        ui.back();
+        assert!(ui.confirm_codex.is_none());
+        assert!(matches!(ui.page, Some(Page::Config(Client::Codex))));
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1166,7 +1447,9 @@ mod tests {
                 )
                 .unwrap();
                 assert!(config.text().contains(credential));
-                assert!(config.command().unwrap().contains(credential));
+                if !http {
+                    assert!(config.command().unwrap().contains(credential));
+                }
             }
         }
         assert_eq!(ui.selected_token(&tokens[..1]), None);
