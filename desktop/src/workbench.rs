@@ -511,7 +511,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             app.send(Command::SystemProxy(false));
                         }
                         ui.separator();
-                        proxy_preferences(app, ui);
+                        proxy_preferences(app, ui, true);
                     }),
                     ("证书", |app, ui| {
                         for (page, label) in CertificatePage::MENU {
@@ -1569,7 +1569,6 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         .id_salt(("table_horizontal", history))
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.set_min_width(980.0);
             ui.visuals_mut().widgets.hovered.bg_fill = colors.chrome;
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color =
                 colors.bg.lerp_to_gamma(colors.line, 0.55);
@@ -1578,32 +1577,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
             } else {
                 egui::Color32::from_rgb(0, 104, 117)
             };
-            let (table_id, id_width) = if all_history_dates {
-                ("all_history_dates", 132.0)
-            } else {
-                ("captures", 48.0)
-            };
-            let table = TableBuilder::new(ui)
-                .id_salt((table_id, history))
-                .resizable(true)
-                .striped(true)
-                .sense(egui::Sense::click())
-                .auto_shrink([false, false])
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::initial(id_width).clip(true))
-                .column(Column::initial(36.0).clip(true))
-                .column(Column::initial(80.0).clip(true))
-                .column(
-                    Column::remainder()
-                        .at_least(230.0)
-                        .clip(true)
-                        .resizable(false),
-                )
-                .column(Column::initial(108.0).clip(true))
-                .column(Column::initial(65.0).clip(true))
-                .column(Column::initial(112.0).clip(true))
-                .column(Column::initial(75.0).clip(true))
-                .column(Column::initial(75.0).clip(true).resizable(false));
+            let table = capture_table_builder(ui, history, all_history_dates);
             let table = if let Some(row) = scroll_to {
                 table.scroll_to_row(row, None)
             } else {
@@ -1631,7 +1605,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                     {
                         row.col(|ui| {
                             capture_cell(ui, index, |ui| {
-                                let title = RichText::new(*title);
+                                let title = RichText::new(*title).font(crate::semibold_font(13.0));
                                 if history {
                                     ui.add(egui::Label::new(title).truncate());
                                     return;
@@ -1714,11 +1688,16 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         for (index, text) in cells.into_iter().enumerate() {
                             table_row.col(|ui| {
                                 capture_cell(ui, index, |ui| {
-                                    let mut text = RichText::new(text).color(if index == 5 {
-                                        color
-                                    } else {
-                                        marked_color.unwrap_or(colors.text)
-                                    });
+                                    let mut text = RichText::new(text)
+                                        .font(egui::FontId::new(
+                                            13.0,
+                                            egui::FontFamily::Name(crate::TABULAR_FAMILY.into()),
+                                        ))
+                                        .color(if index == 5 {
+                                            color
+                                        } else {
+                                            marked_color.unwrap_or(colors.text)
+                                        });
                                     if highlight == Some("划线") {
                                         text = text.strikethrough();
                                     }
@@ -1865,6 +1844,40 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     }
 }
 
+fn capture_table_builder(
+    ui: &mut egui::Ui,
+    history: bool,
+    all_history_dates: bool,
+) -> TableBuilder<'_> {
+    ui.set_min_width(980.0);
+    let (table_id, id_width) = if all_history_dates {
+        ("all_history_dates", 132.0)
+    } else {
+        ("captures", 48.0)
+    };
+    let mut widths = [id_width, 36.0, 80.0, 230.0, 108.0, 65.0, 112.0, 75.0, 75.0];
+    let spacing = ui.spacing();
+    let default_table_width = widths.iter().sum::<f32>()
+        + spacing.item_spacing.x * (widths.len() - 1) as f32
+        + spacing.scroll.allocated_width();
+    // Size the URL against the default widths so it cannot counteract a drag farther right.
+    widths[3] += (ui.available_width() - default_table_width).max(0.0);
+    let mut table = TableBuilder::new(ui)
+        .id_salt((table_id, history))
+        .striped(true)
+        .sense(egui::Sense::click())
+        .auto_shrink([false, false])
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+    for (index, width) in widths.into_iter().enumerate() {
+        table = table.column(
+            Column::initial(width)
+                .clip(true)
+                .resizable(!matches!(index, 3 | 8)),
+        );
+    }
+    table
+}
+
 fn capture_cell(ui: &mut egui::Ui, column: usize, contents: impl FnOnce(&mut egui::Ui)) {
     let layout = match column {
         0 | 1 | 5 => egui::Layout::top_down(egui::Align::Center)
@@ -1904,7 +1917,70 @@ fn moved_index(len: usize, current: Option<usize>, step: isize) -> Option<usize>
 
 #[cfg(test)]
 mod selection_tests {
-    use super::{clear_capture_pressed, egui, moved_index, select_list_item};
+    use super::{
+        capture_table_builder, clear_capture_pressed, egui, moved_index, select_list_item,
+    };
+
+    #[test]
+    fn capture_column_resize_stops_when_the_pointer_stops() {
+        let ctx = egui::Context::default();
+        let frame = |events| {
+            let mut width = 0.0;
+            let mut separator = egui::Pos2::ZERO;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        let gap = ui.spacing().item_spacing.x;
+                        capture_table_builder(ui, false, false)
+                            .header(28.0, |mut row| {
+                                for index in 0..9 {
+                                    row.col(|ui| {
+                                        if index == 4 {
+                                            let cell = ui.max_rect();
+                                            separator = egui::pos2(
+                                                cell.right() + gap / 2.0,
+                                                cell.center().y,
+                                            );
+                                        }
+                                    });
+                                }
+                            })
+                            .body(|body| width = body.widths()[4]);
+                    });
+                },
+            )
+            .textures_delta
+            .clear();
+            (width, separator)
+        };
+
+        let (initial_width, initial_separator) = frame(vec![]);
+        frame(vec![
+            egui::Event::PointerMoved(initial_separator),
+            egui::Event::PointerButton {
+                pos: initial_separator,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        let distance = 40.0;
+        let pointer = initial_separator + egui::vec2(distance, 0.0);
+        frame(vec![egui::Event::PointerMoved(pointer)]);
+        for _ in 0..3 {
+            let (width, separator) = frame(vec![]);
+            assert!((width - initial_width - distance).abs() < 1.0, "{width}");
+            assert!((separator.x - pointer.x).abs() < 1.0, "{separator:?}");
+        }
+    }
 
     #[test]
     fn capture_navigation_does_not_wrap_and_can_start_without_selection() {
@@ -2002,17 +2078,28 @@ fn details(app: &mut Recho, ui: &mut egui::Ui) {
         });
     });
     ui.separator();
-    let height = ui.available_height();
+    let response_gap = 8.0;
+    let height = (ui.available_height() - response_gap).max(0.0);
     let minimum = 120.0_f32.min(height / 2.0);
+    let style = ui.style().clone();
+    // The panel draws its resize line using the parent UI's widget strokes.
+    let widgets = &mut ui.visuals_mut().widgets;
+    widgets.noninteractive.bg_stroke.width = 3.0;
+    widgets.hovered.fg_stroke.width = 3.0;
+    widgets.active.fg_stroke.width = 3.0;
     egui::Panel::top("request")
         .default_size(height * 0.48)
         .min_size(minimum)
         .max_size(height - minimum)
         .resizable(true)
+        .frame(egui::Frame::side_top_panel(&style).inner_margin(egui::Margin::symmetric(0, 2)))
         .show(ui, |ui| {
+            ui.set_style(style.clone());
             ui.take_available_space();
             message(app, ui, 0);
         });
+    ui.set_style(style);
+    ui.add_space(response_gap);
     message(app, ui, 1);
 }
 fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
@@ -2031,20 +2118,8 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
     };
     let panel = &mut app.messages[index];
     ui.horizontal(|ui| {
-        ui.label(RichText::new(if request { "请求" } else { "响应" }).color(colors.accent));
-        if request {
-            ui.selectable_value(&mut panel.tab, MessageTab::Overview, "总览");
-        }
-        ui.selectable_value(&mut panel.tab, MessageTab::Raw, "原始");
-        ui.selectable_value(
-            &mut panel.tab,
-            MessageTab::Headers,
-            if request { "请求头" } else { "响应头" },
-        );
-        ui.selectable_value(
-            &mut panel.tab,
-            MessageTab::Body,
-            if request { "请求体" } else { "响应体" },
+        ui.label(
+            RichText::new(if request { "请求" } else { "响应" }).font(crate::semibold_font(14.0)),
         );
         if !request {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2091,6 +2166,22 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
                 }
             });
         }
+    });
+    ui.horizontal(|ui| {
+        if request {
+            ui.selectable_value(&mut panel.tab, MessageTab::Overview, "总览");
+        }
+        ui.selectable_value(&mut panel.tab, MessageTab::Raw, "原始");
+        ui.selectable_value(
+            &mut panel.tab,
+            MessageTab::Headers,
+            if request { "请求头" } else { "响应头" },
+        );
+        ui.selectable_value(
+            &mut panel.tab,
+            MessageTab::Body,
+            if request { "请求体" } else { "响应体" },
+        );
     });
     ui.separator();
     if request {
@@ -2170,13 +2261,14 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         });
         return;
     }
+    let format = panel.format.get_or_insert(BodyFormat::Raw);
     egui::Frame::new()
         .inner_margin(egui::Margin::symmetric(2, 3))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let is_text = matches!(viewer.content, Content::Text { .. });
-                for (format, label) in [
+                for (option, label) in [
                     (BodyFormat::Raw, "Raw"),
                     (BodyFormat::Json, "JSON"),
                     (BodyFormat::Tree, "Tree"),
@@ -2184,13 +2276,13 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
                 ] {
                     if ui
                         .add_enabled(
-                            is_text || format == BodyFormat::Hex,
-                            egui::Button::selectable(panel.format == format, label)
+                            is_text || option == BodyFormat::Hex,
+                            egui::Button::selectable(*format == option, label)
                                 .min_size(egui::vec2(38.0, 27.0)),
                         )
                         .clicked()
                     {
-                        panel.format = format;
+                        *format = option;
                     }
                 }
                 if let Content::Text { text, .. } = &viewer.content {
@@ -2224,7 +2316,7 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
             return;
         }
     }
-    if matches!(panel.format, BodyFormat::Json | BodyFormat::Tree) {
+    if matches!(*format, BodyFormat::Json | BodyFormat::Tree) {
         let parsed = viewer.structured.get_or_insert_with(|| {
             let bytes = viewer.content.bytes();
             if bytes.len() > 8 * 1024 * 1024 {
@@ -2235,7 +2327,7 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         match parsed {
             Ok(value) => {
                 ui.push_id((&viewer.detail.id, index), |ui| {
-                    body::show_structured(ui, value, panel.format == BodyFormat::Tree);
+                    body::show_structured(ui, value, *format == BodyFormat::Tree);
                 });
             }
             Err(error) => {
@@ -2244,7 +2336,7 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         }
         return;
     }
-    let hex = panel.format == BodyFormat::Hex;
+    let hex = *format == BodyFormat::Hex;
     let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
     let count = if hex {
         viewer.content.bytes().len().div_ceil(16)
@@ -2363,7 +2455,7 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
             {
                 app.send(Command::SystemProxy(!pending && !active));
             }
-            proxy_preferences(app, ui);
+            proxy_preferences(app, ui, false);
             ui.label("客户端可使用上方代理地址。解密 HTTPS 时需信任本地 CA。");
             if ui.button("安装 CA 证书").clicked() {
                 app.certificates.open(CertificatePage::Local);
@@ -2443,10 +2535,10 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
     }
 }
 
-fn proxy_preferences(app: &mut Recho, ui: &mut egui::Ui) {
+fn proxy_preferences(app: &mut Recho, ui: &mut egui::Ui, in_menu: bool) {
     use platform::ProxyProtocol;
     ui.add_enabled_ui(app.ready && !app.proxy_preferences_saving, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        let mut protocols = |ui: &mut egui::Ui| {
             for protocol in ProxyProtocol::ALL {
                 let mut checked = protocol.enabled(app.proxy_preferences);
                 if ui
@@ -2461,7 +2553,12 @@ fn proxy_preferences(app: &mut Recho, ui: &mut egui::Ui) {
                     app.set_proxy_preferences(protocol.toggled(app.proxy_preferences));
                 }
             }
-        });
+        };
+        if in_menu {
+            protocols(ui);
+        } else {
+            ui.horizontal_wrapped(protocols);
+        }
         let mut automatic = app.proxy_preferences.auto;
         if ui
             .checkbox(&mut automatic, "随调试启动启用系统代理")

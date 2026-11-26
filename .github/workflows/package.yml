@@ -36,7 +36,7 @@ jobs:
         run: |
           ./scripts/build.ps1
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -LiteralPath app/build/release/recho.exe -DestinationPath $env:PACKAGE_PATH -Force
+          Compress-Archive -LiteralPath app/build/release/recho.exe, desktop/assets/fonts/Geist-OFL.txt -DestinationPath $env:PACKAGE_PATH -Force
       - uses: actions/upload-artifact@v7
         with:
           path: ${{ env.PACKAGE_PATH }}

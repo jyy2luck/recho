@@ -31,6 +31,107 @@ use std::{
 };
 use worker::{Command, DetailHandle, HistoryHandle, RequestHandle, Worker};
 
+const SEMIBOLD_FAMILY: &str = "semibold";
+const TABULAR_FAMILY: &str = "tabular";
+
+fn semibold_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD_FAMILY.into()))
+}
+
+fn desktop_fonts() -> egui::FontDefinitions {
+    use egui::FontFamily::{Monospace, Name, Proportional};
+
+    let mut fonts = egui::FontDefinitions::default();
+    #[cfg(windows)]
+    let windows_fonts =
+        std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join("Fonts"));
+    #[cfg(windows)]
+    if let Some(directory) = &windows_fonts {
+        prefer_windows_fonts(&mut fonts, directory);
+    }
+    for (name, bytes) in [
+        (
+            "geist",
+            include_bytes!("../assets/fonts/Geist-Regular.ttf").as_slice(),
+        ),
+        (
+            "geist-semibold",
+            include_bytes!("../assets/fonts/Geist-SemiBold.ttf").as_slice(),
+        ),
+        (
+            "geist-tabular-digits",
+            include_bytes!("../assets/fonts/RechoGeistTabular-Regular.ttf").as_slice(),
+        ),
+        (
+            "cjk",
+            include_bytes!("../assets/fonts/DroidSansFallback.ttf").as_slice(),
+        ),
+        (
+            "icons",
+            include_bytes!("../assets/fonts/MaterialIcons-Regular.ttf").as_slice(),
+        ),
+    ] {
+        fonts.font_data.insert(
+            name.into(),
+            std::sync::Arc::new(egui::FontData::from_static(bytes)),
+        );
+    }
+    for family in [Proportional, Monospace] {
+        fonts.families.entry(family).or_default().push("cjk".into());
+    }
+    let proportional = fonts.families.entry(Proportional).or_default();
+    proportional.insert(0, "geist".into());
+    let mut semibold = proportional.clone();
+    semibold[0] = "geist-semibold".into();
+    let mut tabular = proportional.clone();
+    tabular.insert(0, "geist-tabular-digits".into());
+    #[cfg(windows)]
+    if let Some(bytes) = windows_fonts.and_then(|dir| std::fs::read(dir.join("msyhbd.ttc")).ok()) {
+        fonts.font_data.insert(
+            "msyh-bold".into(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        semibold.insert(1, "msyh-bold".into());
+    }
+    fonts
+        .families
+        .insert(Name(SEMIBOLD_FAMILY.into()), semibold);
+    fonts.families.insert(Name(TABULAR_FAMILY.into()), tabular);
+    fonts
+        .families
+        .insert(Name("icons".into()), vec!["icons".into()]);
+    fonts
+}
+
+#[test]
+fn capture_table_font_uses_tabular_digits_with_text_fallback() {
+    let ctx = egui::Context::default();
+    ctx.set_fonts(desktop_fonts());
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+        let regular = egui::FontId::proportional(13.0);
+        let tabular = egui::FontId::new(13.0, egui::FontFamily::Name(TABULAR_FAMILY.into()));
+        ui.fonts_mut(|fonts| {
+            let width = fonts.glyph_width(&tabular, '0');
+            assert!(width > 0.0);
+            for digit in '1'..='9' {
+                assert_eq!(fonts.glyph_width(&tabular, digit), width);
+            }
+            assert_ne!(
+                fonts.glyph_width(&regular, '0'),
+                fonts.glyph_width(&regular, '1')
+            );
+            for text in ['A', '请'] {
+                assert!(fonts.has_glyph(&tabular, text));
+                assert_eq!(
+                    fonts.glyph_width(&tabular, text),
+                    fonts.glyph_width(&regular, text)
+                );
+            }
+        });
+    });
+    output.textures_delta.clear();
+}
+
 #[cfg(windows)]
 fn prefer_windows_fonts(fonts: &mut egui::FontDefinitions, directory: &std::path::Path) {
     use egui::FontFamily::{Monospace, Proportional};
@@ -158,14 +259,14 @@ enum MessageTab {
 }
 struct MessagePanel {
     tab: MessageTab,
-    format: BodyFormat,
+    format: Option<BodyFormat>,
     viewer: Option<Viewer>,
 }
 impl MessagePanel {
     fn new(tab: MessageTab) -> Self {
         Self {
             tab,
-            format: BodyFormat::Raw,
+            format: None,
             viewer: None,
         }
     }
@@ -255,30 +356,7 @@ impl Recho {
             Err(error) => (theme::Theme::default(), Some(error)),
         };
         theme.apply(&cc.egui_ctx);
-        let mut fonts = egui::FontDefinitions::default();
-        #[cfg(windows)]
-        if let Some(windows) = std::env::var_os("SystemRoot") {
-            prefer_windows_fonts(&mut fonts, &PathBuf::from(windows).join("Fonts"));
-        }
-        fonts.font_data.insert(
-            "cjk".into(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/DroidSansFallback.ttf"
-            ))),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push("cjk".into());
-        }
-        fonts.font_data.insert(
-            "icons".into(),
-            std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
-                "../assets/fonts/MaterialIcons-Regular.ttf"
-            ))),
-        );
-        fonts
-            .families
-            .insert(egui::FontFamily::Name("icons".into()), vec!["icons".into()]);
-        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx.set_fonts(desktop_fonts());
         Self {
             #[cfg(windows)]
             title_bar,
@@ -407,6 +485,9 @@ impl Recho {
         self.select_detail(id);
     }
     fn select_detail(&mut self, id: Option<String>) {
+        if self.selected != id {
+            self.messages[1].format = None;
+        }
         self.selected = id;
         self.generation += 1;
         for message in &mut self.messages {
@@ -827,8 +908,10 @@ impl Recho {
                         Ok(mut detail) => {
                             let content = Content::new(std::mem::take(&mut detail.bytes));
                             let panel = &mut self.messages[index];
-                            if matches!(content, Content::Binary(_)) {
-                                panel.format = BodyFormat::Hex;
+                            if detail.phase == Phase::Request
+                                && matches!(content, Content::Binary(_))
+                            {
+                                panel.format = Some(BodyFormat::Hex);
                             }
                             panel.viewer = Some(Viewer {
                                 detail,

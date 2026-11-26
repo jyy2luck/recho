@@ -3,23 +3,49 @@ use crate::{BodyFormat, files, theme::Theme};
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 use serde_json::Value;
-use std::{borrow::Cow, collections::HashSet};
+use std::{borrow::Cow, collections::HashSet, time::Duration};
 use tokio::sync::oneshot;
 
 pub type SaveHandle = oneshot::Receiver<Result<bool, String>>;
+
+const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1500);
 
 #[derive(Default)]
 pub struct View {
     search: Search,
     tree: Option<Result<Tree, String>>,
     pretty: Option<Result<FormattedJson, String>>,
+    copied_until: f64,
 }
 
 impl View {
+    fn body_format(
+        &mut self,
+        content: &Content,
+        selected_format: Option<BodyFormat>,
+        has_raw_headers: bool,
+    ) -> BodyFormat {
+        if matches!(content, Content::Binary(_)) {
+            return BodyFormat::Hex;
+        }
+        selected_format.unwrap_or_else(|| {
+            if !has_raw_headers
+                && self
+                    .pretty
+                    .get_or_insert_with(|| prepare_json(content.bytes()))
+                    .is_ok()
+            {
+                BodyFormat::Json
+            } else {
+                BodyFormat::Raw
+            }
+        })
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        format: &mut BodyFormat,
+        selected_format: &mut Option<BodyFormat>,
         content: &Content,
         notice: Option<&str>,
         raw_headers: Option<&str>,
@@ -28,6 +54,7 @@ impl View {
     ) {
         let bytes = content.bytes();
         let is_text = matches!(content, Content::Text { .. });
+        let mut format = self.body_format(content, *selected_format, raw_headers.is_some());
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
             for (option, label) in [
@@ -39,15 +66,16 @@ impl View {
                 if ui
                     .add_enabled(
                         is_text || option == BodyFormat::Hex,
-                        egui::Button::selectable(*format == option, label)
+                        egui::Button::selectable(format == option, label)
                             .min_size(egui::vec2(35.0, 25.0)),
                     )
                     .clicked()
                 {
-                    *format = option;
+                    *selected_format = Some(option);
+                    format = option;
                 }
             }
-            let tree = (*format == BodyFormat::Tree).then(|| {
+            let tree = (format == BodyFormat::Tree).then(|| {
                 self.tree
                     .get_or_insert_with(|| parse_json(bytes).map(Tree::new))
             });
@@ -78,24 +106,37 @@ impl View {
                 {
                     *saving = Some(save(ui.ctx(), content, mime, notice.is_some()));
                 }
-                let copy_title = match (is_text, notice.is_some()) {
-                    (false, _) => "复制十六进制正文",
-                    (true, true) => "复制正文预览",
-                    (true, false) => "复制正文",
+                let json = if format == BodyFormat::Json {
+                    self.pretty
+                        .get_or_insert_with(|| prepare_json(bytes))
+                        .as_ref()
+                        .ok()
+                } else {
+                    None
                 };
-                if action(ui, "\u{e14d}", copy_title, !bytes.is_empty()).clicked() {
-                    let text = match content {
-                        Content::Text { text, .. } => text.clone(),
-                        Content::Binary(bytes) => {
-                            use std::fmt::Write;
-                            let mut text = String::with_capacity(bytes.len() * 2);
-                            for byte in bytes {
-                                let _ = write!(text, "{byte:02x}");
-                            }
-                            text
-                        }
-                    };
-                    ui.ctx().copy_text(text);
+                let copy_title = match (format, is_text, notice.is_some()) {
+                    (BodyFormat::Json, _, _) => "复制格式化 JSON",
+                    (_, false, _) => "复制十六进制正文",
+                    (_, true, true) => "复制正文预览",
+                    (_, true, false) => "复制正文",
+                };
+                let copy = action_button(
+                    ui,
+                    "\u{e14d}",
+                    copy_title,
+                    !bytes.is_empty() && (format != BodyFormat::Json || json.is_some()),
+                );
+                let now = ui.input(|input| input.time);
+                if copy.clicked() {
+                    ui.ctx().copy_text(clipboard_text(content, json));
+                    self.copied_until = now + COPY_FEEDBACK_DURATION.as_secs_f64();
+                }
+                if now < self.copied_until {
+                    ui.ctx()
+                        .request_repaint_after(Duration::from_secs_f64(self.copied_until - now));
+                    egui::Tooltip::for_widget(&copy).show(|ui| ui.label("已复制"));
+                } else {
+                    copy.on_hover_text(copy_title);
                 }
                 let collapse = action(ui, "\u{e5d6}", "收起全部节点", can_collapse).clicked();
                 let expand = action(ui, "\u{e5d7}", "展开全部节点", can_expand).clicked();
@@ -131,37 +172,34 @@ impl View {
             BodyFormat::Tree => match self.tree.as_mut().expect("tree format was prepared") {
                 Ok(tree) => tree.show(ui, &mut self.search),
                 Err(error) => {
-                    self.search.refresh(*format, |_| Vec::new());
+                    self.search.refresh(format, |_| Vec::new());
                     ui.weak(error.as_str());
                 }
             },
-            BodyFormat::Json => match self
-                .pretty
-                .get_or_insert_with(|| parse_json(bytes).and_then(|value| formatted_json(&value)))
-            {
+            BodyFormat::Json => match self.pretty.get_or_insert_with(|| prepare_json(bytes)) {
                 Ok(json) => {
-                    self.search.refresh_text(*format, &json.text, &json.index);
-                    let (scroll, _) = self.search.scroll_area(ui, *format);
+                    self.search.refresh_text(format, &json.text, &json.index);
+                    let (scroll, _) = self.search.scroll_area(ui, format);
                     json.show(ui, scroll, self.search.active());
                 }
                 Err(error) => {
-                    self.search.refresh(*format, |_| Vec::new());
+                    self.search.refresh(format, |_| Vec::new());
                     ui.weak(error.as_str());
                 }
             },
             BodyFormat::Raw => {
                 if let Content::Text { text, index } = content {
-                    show_text(ui, &mut self.search, *format, text, index);
+                    show_text(ui, &mut self.search, format, text, index);
                 }
             }
             BodyFormat::Hex => {
                 let count = bytes.len().div_ceil(16);
-                self.search.refresh(*format, |query| {
+                self.search.refresh(format, |query| {
                     (0..count)
                         .filter(|&row| hex_row(bytes, row).to_ascii_lowercase().contains(query))
                         .collect()
                 });
-                let (scroll, height) = self.search.scroll_area(ui, *format);
+                let (scroll, height) = self.search.scroll_area(ui, format);
                 scroll.show_rows(ui, height, count, |ui, range| {
                     for row in range {
                         self.search.label(ui, row, hex_row(bytes, row));
@@ -172,6 +210,27 @@ impl View {
     }
 }
 
+fn clipboard_text(content: &Content, json: Option<&FormattedJson>) -> String {
+    if let Some(json) = json {
+        return json.text.clone();
+    }
+    match content {
+        Content::Text { text, .. } => text.clone(),
+        Content::Binary(bytes) => {
+            use std::fmt::Write;
+            let mut text = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                let _ = write!(text, "{byte:02x}");
+            }
+            text
+        }
+    }
+}
+
+fn prepare_json(bytes: &[u8]) -> Result<FormattedJson, String> {
+    parse_json(bytes).and_then(|value| formatted_json(&value))
+}
+
 fn parse_json(bytes: &[u8]) -> Result<Value, String> {
     if bytes.len() > 8 * 1024 * 1024 {
         return Err("结构化视图支持最多 8 MiB，完整正文可在 Raw / Hex 查看".into());
@@ -180,6 +239,10 @@ fn parse_json(bytes: &[u8]) -> Result<Value, String> {
 }
 
 pub fn action(ui: &mut egui::Ui, glyph: &str, title: &str, enabled: bool) -> egui::Response {
+    action_button(ui, glyph, title, enabled).on_hover_text(title)
+}
+
+fn action_button(ui: &mut egui::Ui, glyph: &str, title: &str, enabled: bool) -> egui::Response {
     let response = ui.add_enabled(
         enabled,
         egui::Button::new(crate::workbench::icon(glyph).size(16.0))
@@ -187,7 +250,7 @@ pub fn action(ui: &mut egui::Ui, glyph: &str, title: &str, enabled: bool) -> egu
             .frame_when_inactive(false),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, title));
-    response.on_hover_text(title)
+    response
 }
 
 fn save(ctx: &egui::Context, content: &Content, mime: &str, preview: bool) -> SaveHandle {
@@ -639,6 +702,34 @@ fn snippet(text: &str) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn response_defaults_to_json_and_copies_the_displayed_format() {
+        let original = r#"{"field":[1,2]}"#;
+        let content = Content::new(original.as_bytes().to_vec());
+        let mut view = View::default();
+        assert_eq!(view.body_format(&content, None, false), BodyFormat::Json);
+        assert_eq!(
+            view.body_format(&content, Some(BodyFormat::Raw), false),
+            BodyFormat::Raw
+        );
+        assert_eq!(view.body_format(&content, None, true), BodyFormat::Raw);
+
+        let json = view.pretty.as_ref().unwrap().as_ref().unwrap();
+        assert_eq!(
+            clipboard_text(&content, Some(json)),
+            "{\n  \"field\": [\n    1,\n    2\n  ]\n}"
+        );
+        assert_eq!(clipboard_text(&content, None), original);
+        assert_eq!(
+            View::default().body_format(&Content::new(b"{".to_vec()), None, false),
+            BodyFormat::Raw
+        );
+        assert_eq!(
+            View::default().body_format(&Content::Binary(vec![0xff]), None, false),
+            BodyFormat::Hex
+        );
+    }
 
     #[test]
     fn tree_keeps_top_level_fields_visible_and_reveals_nested_search_matches() {

@@ -7,7 +7,7 @@ root = Path(__file__).resolve().parent.parent
 bundle = root / "app/build/release/recho.app/Contents"
 (bundle / "MacOS").mkdir(parents=True, exist_ok=True)
 (bundle / "Resources").mkdir(exist_ok=True)
-for filename in ["NOTICE", "SOURCES.md"]:
+for filename in ["NOTICE", "SOURCES.md", "Geist-OFL.txt"]:
     shutil.copy2(root / "desktop/assets/fonts" / filename, bundle / "Resources" / filename)
 shutil.copy2(root / "desktop/assets/icons/recho.icns", bundle / "Resources/recho.icns")
 shutil.copy2(root / "app/build/release/recho", bundle / "MacOS/recho")
