@@ -182,6 +182,8 @@ pub struct History {
     epoch: Uuid,
     pub revision: u64,
     session_revisions: BTreeMap<String, u64>,
+    live_ids: BTreeMap<String, u64>,
+    next_live_id: u64,
     pub capture_list_filters: crate::capture_filters::Filters,
     limit: usize,
     pub error: Option<String>,
@@ -207,6 +209,8 @@ impl History {
             epoch: Uuid::new_v4(),
             revision: 0,
             session_revisions: BTreeMap::new(),
+            live_ids: BTreeMap::new(),
+            next_live_id: 1,
             capture_list_filters: crate::capture_filters::Filters::load(directory)?,
             limit,
             error: None,
@@ -257,6 +261,7 @@ impl History {
         self.revision += 1;
         self.session_revisions
             .insert(session.id.clone(), self.revision);
+        self.assign_live_id(&session.id);
         self.sessions.insert(0, session.clone());
         if self.desktop_updates.is_some() {
             if !session.incognito {
@@ -269,11 +274,15 @@ impl History {
                 if let Some((index, _)) = overflow {
                     let removed = self.sessions.remove(index);
                     self.session_revisions.remove(&removed.id);
+                    if let Ok(None) = self.is_archived(&removed.id) {
+                        self.live_ids.remove(&removed.id);
+                    }
                 }
             }
         } else {
             for removed in self.sessions.drain(self.limit.min(self.sessions.len())..) {
                 self.session_revisions.remove(&removed.id);
+                self.live_ids.remove(&removed.id);
             }
         }
         if session.incognito {
@@ -320,6 +329,15 @@ impl History {
         }
     }
     pub fn clear_live(&mut self) {
+        if self.desktop_updates.is_some() {
+            for session in &self.sessions {
+                if session.incognito || matches!(self.is_archived(&session.id), Ok(None)) {
+                    self.live_ids.remove(&session.id);
+                }
+            }
+        } else {
+            self.live_ids.clear();
+        }
         self.sessions.clear();
         self.revision += 1;
         self.session_revisions.clear();
@@ -327,11 +345,15 @@ impl History {
         self.reset_capture_updates();
     }
     pub fn clear_group(&mut self, group: &str) {
+        let desktop = self.desktop_updates.is_some();
         self.sessions.retain(|session| {
             let remove = session.capture_group == group
                 || (group == "default" && session.capture_group.is_empty());
             if remove {
                 self.session_revisions.remove(&session.id);
+                if !desktop || session.incognito {
+                    self.live_ids.remove(&session.id);
+                }
             }
             !remove
         });
@@ -369,6 +391,11 @@ impl History {
             for path in written {
                 let _ = fs::remove_file(path);
             }
+        } else if self.desktop_updates.is_some() {
+            for (session, _, _) in &items {
+                self.assign_live_id(&session.id);
+            }
+            self.reset_capture_updates();
         }
         result
     }
@@ -377,6 +404,7 @@ impl History {
         self.sessions.clear();
         self.revision += 1;
         self.session_revisions.clear();
+        self.live_ids.clear();
         self.volatile_bodies.clear();
         self.reset_capture_updates();
         for entry in fs::read_dir(self.directory.join("bodies"))? {
@@ -446,6 +474,7 @@ impl History {
         }
         self.db.execute("DELETE FROM sessions WHERE id=?", [id])?;
         self.sessions.retain(|s| s.id != id);
+        self.live_ids.remove(id);
         self.revision += 1;
         self.session_revisions.remove(id);
         self.volatile_bodies.retain(|(key, _), _| key != id);

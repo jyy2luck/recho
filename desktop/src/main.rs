@@ -221,8 +221,6 @@ struct Recho {
     rows: Vec<Row>,
     visible: Vec<usize>,
     application_icons: application_icons::ApplicationIcons,
-    sequence: BTreeMap<String, usize>,
-    next_sequence: usize,
     host_filter: String,
     app_filter: String,
     protocol_filter: String,
@@ -331,8 +329,6 @@ impl Recho {
             rows: Vec::new(),
             visible: Vec::new(),
             application_icons: application_icons::ApplicationIcons::default(),
-            sequence: BTreeMap::new(),
-            next_sequence: 1,
             host_filter: String::new(),
             app_filter: String::new(),
             protocol_filter: String::new(),
@@ -740,7 +736,6 @@ impl Recho {
             })
             .collect();
         let rows = &self.rows;
-        let numbers = &self.sequence;
         let column = self.sort_column;
         self.visible.sort_by(|&a, &b| {
             let a = &rows[a];
@@ -753,7 +748,7 @@ impl Recho {
                 6 => a.server_ip.cmp(&b.server_ip),
                 7 => a.duration_ms.cmp(&b.duration_ms),
                 8 => a.response_bytes.cmp(&b.response_bytes),
-                _ => numbers.get(&a.id).cmp(&numbers.get(&b.id)),
+                _ => a.live_id.cmp(&b.live_id),
             };
             if self.ascending {
                 order

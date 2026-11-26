@@ -1365,7 +1365,8 @@ test('filter metadata records the client and interceptor kinds and survives rest
   assert.equal(result.status, 200);
   assert.equal(JSON.parse(result.body)['x-filter'], 'changed');
   assert.equal(JSON.parse(result.body)['x-script'], 'ran');
-  const session = (await api('/state')).value.sessions.find(item => item.url === url);
+  const { liveId, ...session } = (await api('/state')).value.sessions.find(item => item.url === url);
+  assert.ok(Number.isInteger(liveId) && liveId > 0);
   assert.equal(session.clientIP, '127.0.0.1');
   assert.deepEqual(new Set(session.interceptors), new Set(['镜像', '网关', '重写', '脚本']));
   assert.equal(session.serverIP, '127.0.0.1');

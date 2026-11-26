@@ -317,7 +317,14 @@ fn tools() -> Value {
         ),
         (
             "capture_live_filter",
-            "Find captured requests by URL/method/body text",
+            "Search live captures only by URL, method, or body text. For an unspecified scope, use capture_search",
+            schema(json!({"query":string}), &["query"]),
+            true,
+            false,
+        ),
+        (
+            "capture_search",
+            "Search by URL, method, or body text. Searches live captures first and uses saved history only when there are no live matches",
             schema(json!({"query":string}), &["query"]),
             true,
             false,
@@ -358,8 +365,14 @@ fn tools() -> Value {
         ),
         (
             "capture_live_get_by_id",
-            "Get a live or saved request by its stable session ID (UUID), not the UI row number",
-            schema(json!({"id":string}), &["id"]),
+            "Get a request by its numeric ID as displayed in the desktop capture list, or by its session UUID. Searches live first, then saved history unless liveOnly is true. For a numeric history match, returns the most recent matching date",
+            schema(
+                json!({
+                    "id":{"type":["integer","string"],"description":"Positive capture ID (number or numeric string), or a session UUID"},
+                    "liveOnly":{"type":"boolean","description":"Restrict the lookup to live captures"}
+                }),
+                &["id"],
+            ),
             true,
             false,
         ),
@@ -746,12 +759,18 @@ async fn call_tool(directory: &Path, name: &str, args: &Value) -> Result<Value> 
     }
     for (key, value) in values {
         let property = &properties[key];
-        let valid = match property["type"].as_str().unwrap_or("") {
+        let matches_type = |kind| match kind {
             "string" => value.is_string(),
             "boolean" => value.is_boolean(),
             "object" => value.is_object(),
             "integer" => value.is_u64(),
             _ => false,
+        };
+        let kind = &property["type"];
+        let valid = if let Some(types) = kind.as_array() {
+            types.iter().filter_map(Value::as_str).any(matches_type)
+        } else {
+            matches_type(kind.as_str().unwrap_or(""))
         };
         if !valid
             || property
@@ -866,27 +885,37 @@ async fn call_tool(directory: &Path, name: &str, args: &Value) -> Result<Value> 
             .await
         }
         "capture_live_status" => api(directory, "GET", "/state", None).await,
-        "capture_live_filter" => {
-            let state = api(directory, "GET", "/state", None).await?;
-            let sessions = state["sessions"]
-                .as_array()
-                .ok_or_else(|| Error::bad("Missing sessions"))?;
-            let query = text_arg(args, "query")?.to_lowercase();
-            Ok(json!(
-                sessions
-                    .iter()
-                    .filter(|s| s.to_string().to_lowercase().contains(&query))
-                    .collect::<Vec<_>>()
-            ))
+        "capture_live_filter" | "capture_search" => {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("query", text_arg(args, "query")?)
+                .append_pair(
+                    "liveOnly",
+                    if name == "capture_live_filter" {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                )
+                .finish();
+            api(directory, "GET", &format!("/captures?{query}"), None).await
         }
         "capture_live_get_by_id" => {
-            api(
-                directory,
-                "GET",
-                &format!("/history/{}", identifier(args)?),
-                None,
-            )
-            .await
+            let id = match args["id"].as_u64() {
+                Some(number) => number.to_string(),
+                None => identifier(args)?.to_owned(),
+            };
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("id", &id)
+                .append_pair(
+                    "liveOnly",
+                    if args["liveOnly"] == true {
+                        "true"
+                    } else {
+                        "false"
+                    },
+                )
+                .finish();
+            api(directory, "GET", &format!("/captures/by-id?{query}"), None).await
         }
         "capture_live_set_enabled" => {
             api(
@@ -1042,6 +1071,7 @@ impl Scope {
                     | "capture_list_filter_set_enabled"
                     | "capture_list_filter_delete"
                     | "capture_live_filter"
+                    | "capture_search"
                     | "capture_live_get_by_id"
                     | "history_list"
                     | "history_get_by_id"
@@ -1088,7 +1118,7 @@ pub async fn dispatch(message: Value, scope: Scope, directory: &Path) -> Option<
             } else {
                 HTTP_PROTOCOLS.last().unwrap()
             };
-            json!({"protocolVersion":protocol,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":crate::identity::SLUG,"version":env!("CARGO_PKG_VERSION")},"instructions":"Debug the connected Recho instance. Keep the target application running. API requests can change remote services; use only user-authorized destinations. Use history_list with query/offset/limit to search saved requests; capture_live_filter only searches the live buffer. Use history_get_by_id with the date and numeric ID shown on the History page. Look up a session UUID with capture_live_get_by_id."})
+            json!({"protocolVersion":protocol,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":crate::identity::SLUG,"version":env!("CARGO_PKG_VERSION")},"instructions":"Debug the connected Recho instance. Keep the target application running. API requests can change remote services. Use only user-authorized destinations. When the user does not specify a scope, use capture_live_get_by_id for a numeric ID or session UUID and capture_search for text. These tools search live captures first and fall back to saved history only on a miss. For explicit live queries, set liveOnly=true for ID lookups or use capture_live_filter for text. For explicit history queries, use history_get_by_id with the date and numeric ID shown on the History page or use history_list for text."})
         }
         "ping" => json!({}),
         "tools/list" => {
@@ -1361,6 +1391,19 @@ mod tests {
         tokens
             .update("POST", None, json!({"name":"MCP test"}))
             .unwrap();
+        {
+            let mut history = crate::storage::History::open(directory.path(), 200).unwrap();
+            for day in ["2025-01-01", "2025-01-02"] {
+                for index in 1..=2 {
+                    history.insert(&crate::storage::Session {
+                        id: format!("saved-{day}-{index}"),
+                        url: format!("http://example.test/mcp-capture/history-{index}"),
+                        started_at: format!("{day}T12:00:00.000Z"),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
         let running = crate::server::start_embedded(
             directory.path().into(),
             Some(0),
@@ -1413,7 +1456,10 @@ mod tests {
         for (name, arguments) in [
             ("capture_live_status", json!({})),
             ("capture_live_filter", json!({"query":url})),
+            ("capture_search", json!({"query":"mcp-capture"})),
             ("capture_live_get_by_id", json!({"id":capture["id"]})),
+            ("capture_live_get_by_id", json!({"id":1})),
+            ("capture_live_get_by_id", json!({"id":"1","liveOnly":true})),
             ("history_get_by_id", json!({"date":date,"id":1})),
         ] {
             let result = call(name, arguments).await;
@@ -1422,13 +1468,39 @@ mod tests {
                 serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
             let record = match name {
                 "capture_live_status" => &value["sessions"][0],
-                "capture_live_filter" => &value[0],
+                "capture_live_filter" | "capture_search" => {
+                    assert_eq!(value.as_array().unwrap().len(), 1);
+                    &value[0]
+                }
                 _ => &value,
             };
             assert_eq!(record["id"], capture["id"], "{name}");
             assert_eq!(record["url"], url, "{name}");
             assert_eq!(record["status"], 200, "{name}");
+            if name != "history_get_by_id" {
+                assert_eq!(record["liveId"], 1, "{name}");
+            }
         }
+        let record = call("capture_live_get_by_id", json!({"id":2})).await;
+        assert_eq!(record["isError"], false);
+        let record: Value =
+            serde_json::from_str(record["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(record["id"], "saved-2025-01-02-2");
+        assert_eq!(record["historyId"], 2);
+        assert_eq!(record["historyDate"], "2025-01-02");
+        assert_eq!(
+            call("capture_live_get_by_id", json!({"id":2,"liveOnly":true})).await["isError"],
+            true
+        );
+        let matches = call("capture_search", json!({"query":"history-2"})).await;
+        assert_eq!(matches["isError"], false);
+        let matches: Value =
+            serde_json::from_str(matches["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(matches.as_array().unwrap().len(), 2);
+        assert_eq!(matches[0]["id"], "saved-2025-01-02-2");
+        let live = call("capture_live_filter", json!({"query":"history-2"})).await;
+        assert_eq!(live["isError"], false);
+        assert_eq!(live["content"][0]["text"], "[]");
         for (query, status) in [
             ("date=2026-02-30&id=1".to_owned(), 400),
             (format!("date={date}&id=0"), 400),

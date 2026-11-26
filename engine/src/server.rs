@@ -1025,7 +1025,12 @@ impl Engine {
                 Some(revision) => history.sessions_since(revision),
                 None => history.sessions.iter().collect(),
             };
-            state["sessions"] = json!(sessions);
+            state["sessions"] = Value::Array(
+                sessions
+                    .into_iter()
+                    .map(|session| history.capture_record(session))
+                    .collect(),
+            );
             state["sessionsDelta"] = json!(since.is_some());
             state["sessionIDs"] = json!(history.sessions.iter().map(|s| &s.id).collect::<Vec<_>>());
             json_reply(200, state)
@@ -1498,6 +1503,22 @@ impl Engine {
                         }
                     }
                     Ok(response)
+                }
+                ("GET", "/captures" | "/captures/by-id") => {
+                    let query: BTreeMap<_, _> =
+                        url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes()).collect();
+                    let live_only = query.get("liveOnly").is_some_and(|value| value == "true");
+                    let history = self.history.lock().unwrap();
+                    let result = if request.uri().path() == "/captures/by-id" {
+                        let id = query.get("id").filter(|id| !id.is_empty())
+                            .ok_or_else(|| Error::bad("Missing capture ID"))?;
+                        history.find_capture(id, live_only)?
+                            .ok_or_else(|| Error::new(404, "Captured request not found in the requested scope"))?
+                    } else {
+                        let text = query.get("query").map_or("", |value| value.as_ref());
+                        json!(history.search_captures(text, live_only)?)
+                    };
+                    Ok(json_reply(200, result))
                 }
                 ("GET", "/history/by-id") => {
                     let mut query = url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes());

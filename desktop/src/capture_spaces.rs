@@ -210,14 +210,6 @@ impl Recho {
     }
 
     pub(super) fn rebuild_capture_rows(&mut self) {
-        self.sequence
-            .retain(|id, _| self.capture_positions.contains_key(id));
-        for row in &self.rows {
-            if !self.sequence.contains_key(&row.id) {
-                self.sequence.insert(row.id.clone(), self.next_sequence);
-                self.next_sequence += 1;
-            }
-        }
         self.evaluate_conditions();
         if self.navigation != crate::Navigation::History {
             self.selection

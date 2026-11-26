@@ -41,6 +41,7 @@ impl Phase {
 #[derive(Clone, Debug)]
 pub struct Row {
     pub id: String,
+    pub live_id: Option<u64>,
     pub history_date: Option<String>,
     pub history_id: Option<u64>,
     pub method: String,
@@ -66,6 +67,7 @@ impl From<&crate::storage::Session> for Row {
     fn from(session: &crate::storage::Session) -> Self {
         Self {
             id: session.id.clone(),
+            live_id: None,
             history_date: None,
             history_id: None,
             method: session.method.clone(),
@@ -226,8 +228,14 @@ impl DesktopEngine {
         let settings = engine.settings.snapshot();
         Snapshot {
             revision: history.revision,
-            rows: (include_rows && revision != Some(history.revision))
-                .then(|| history.sessions.iter().rev().map(Row::from).collect()),
+            rows: (include_rows && revision != Some(history.revision)).then(|| {
+                history
+                    .sessions
+                    .iter()
+                    .rev()
+                    .map(|session| history.capture_row(session))
+                    .collect()
+            }),
             running: proxy.running,
             port: proxy.port,
             intercept_tls: proxy.intercept,

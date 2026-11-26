@@ -2409,6 +2409,7 @@ mod tests {
     #[test]
     fn pasting_capture_curl_imports_request_fields() {
         let row = Row {
+            live_id: None,
             id: "capture".into(),
             history_id: None,
             history_date: None,

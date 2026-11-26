@@ -1681,7 +1681,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                                     _ => "—".into(),
                                 }
                             } else {
-                                app.sequence.get(&row.id).unwrap_or(&0).to_string()
+                                row.live_id.map_or_else(|| "—".into(), |id| id.to_string())
                             },
                             if row.url.starts_with("https:") {
                                 "♢".into()

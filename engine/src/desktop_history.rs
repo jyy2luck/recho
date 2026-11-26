@@ -1,6 +1,7 @@
 use super::*;
 use crate::native::Row;
 use rusqlite::OptionalExtension;
+use serde_json::{Value, json};
 use std::{collections::BTreeSet, io::Read};
 
 #[derive(Default)]
@@ -130,6 +131,14 @@ impl History {
             &format!("CREATE INDEX IF NOT EXISTS sessions_active_group ON sessions({GROUP}, started_at) WHERE archived = 0"),
             [],
         )?;
+        let active_ids = self
+            .db
+            .prepare("SELECT id FROM sessions WHERE archived = 0 ORDER BY started_at, id")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in active_ids {
+            self.assign_live_id(&id);
+        }
         self.desktop_updates = Some(CaptureUpdates {
             reload: true,
             ..Default::default()
@@ -148,7 +157,9 @@ impl History {
 
     pub(super) fn publish_capture(&mut self, session: &Session) {
         if let Some(updates) = &mut self.desktop_updates {
-            updates.rows.insert(session.id.clone(), Row::from(session));
+            let mut row = Row::from(session);
+            row.live_id = self.live_ids.get(&session.id).copied();
+            updates.rows.insert(session.id.clone(), row);
         }
     }
 
@@ -164,7 +175,7 @@ impl History {
         group: &str,
         switched: bool,
     ) -> Result<Option<CaptureBatch>> {
-        let Some(updates) = &mut self.desktop_updates else {
+        let Some(updates) = &self.desktop_updates else {
             return Ok(None);
         };
         let replace = switched || updates.reload;
@@ -176,20 +187,21 @@ impl History {
             let mut rows = BTreeMap::new();
             while let Some(row) = result.next()? {
                 let document = row.get_ref(0)?.as_str().map_err(crate::wire::Error::bad)?;
-                let row = Row::from(&serde_json::from_str::<Session>(document)?);
+                let row = self.capture_row(&serde_json::from_str::<Session>(document)?);
                 rows.insert(row.id.clone(), row);
             }
             rows.extend(
                 self.sessions
                     .iter()
                     .filter(|s| s.incognito && s.capture_group == group)
-                    .map(|session| (session.id.clone(), Row::from(session))),
+                    .map(|session| (session.id.clone(), self.capture_row(session))),
             );
+            let updates = self.desktop_updates.as_mut().unwrap();
             updates.rows.clear();
             updates.reload = false;
             rows
         } else {
-            let mut rows = std::mem::take(&mut updates.rows);
+            let mut rows = std::mem::take(&mut self.desktop_updates.as_mut().unwrap().rows);
             rows.retain(|_, row| row.group == group);
             if rows.is_empty() {
                 return Ok(None);
@@ -209,21 +221,32 @@ impl History {
         ids: Option<&[String]>,
     ) -> Result<(usize, usize)> {
         let transaction = self.db.transaction()?;
-        let mut count = 0;
-        if let Some(ids) = ids {
+        let archived = if let Some(ids) = ids {
             let mut update = transaction.prepare(&format!(
-                "UPDATE sessions SET archived = 1 WHERE archived = 0 AND {GROUP} = ? AND id = ?"
+                "UPDATE sessions SET archived = 1 WHERE archived = 0 AND {GROUP} = ? AND id = ? RETURNING id"
             ))?;
+            let mut archived = Vec::new();
             for id in ids {
-                count += update.execute(params![group, id])?;
+                if let Some(id) = update
+                    .query_row(params![group, id], |row| row.get::<_, String>(0))
+                    .optional()?
+                {
+                    archived.push(id);
+                }
             }
+            archived
         } else {
-            count = transaction.execute(
-                &format!("UPDATE sessions SET archived = 1 WHERE archived = 0 AND {GROUP} = ?"),
-                [group],
-            )?;
-        }
+            transaction
+                .prepare(&format!(
+                    "UPDATE sessions SET archived = 1 WHERE archived = 0 AND {GROUP} = ? RETURNING id"
+                ))?
+                .query_map([group], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
         transaction.commit()?;
+        for id in &archived {
+            self.live_ids.remove(id);
+        }
         let discarded = self
             .sessions
             .iter()
@@ -238,6 +261,7 @@ impl History {
                 let keep = row.capture_group != group || !ids.contains(&row.id);
                 if !keep {
                     self.session_revisions.remove(&row.id);
+                    self.live_ids.remove(&row.id);
                 }
                 keep
             });
@@ -248,7 +272,107 @@ impl History {
         } else {
             self.clear_group(group);
         }
-        Ok((count, discarded))
+        Ok((archived.len(), discarded))
+    }
+
+    pub(super) fn assign_live_id(&mut self, id: &str) {
+        if !self.live_ids.contains_key(id) {
+            self.live_ids.insert(id.to_owned(), self.next_live_id);
+            self.next_live_id += 1;
+        }
+    }
+
+    pub(crate) fn capture_row(&self, session: &Session) -> Row {
+        let mut row = Row::from(session);
+        row.live_id = self.live_ids.get(&session.id).copied();
+        row
+    }
+
+    pub(crate) fn capture_record(&self, session: &Session) -> Value {
+        let mut record = json!(session);
+        if let Some(number) = self.live_ids.get(&session.id) {
+            record["liveId"] = json!(number);
+        }
+        record
+    }
+
+    pub(crate) fn find_capture(&self, id: &str, live_only: bool) -> Result<Option<Value>> {
+        if id.bytes().all(|byte| byte.is_ascii_digit()) {
+            let number = id
+                .parse::<i64>()
+                .ok()
+                .filter(|number| *number > 0)
+                .ok_or_else(|| crate::wire::Error::bad("id must be a positive capture ID"))?;
+            if let Some((uuid, _)) = self
+                .live_ids
+                .iter()
+                .find(|(_, live)| **live == number as u64)
+                && let Some(session) = self.get(uuid)?
+            {
+                return Ok(Some(self.capture_record(&session)));
+            }
+            if live_only {
+                return Ok(None);
+            }
+            let match_in_history = self.db.query_row(
+                "SELECT document, day FROM history_ids JOIN sessions ON sessions.id = history_ids.session_id
+                 WHERE number = ? ORDER BY day DESC LIMIT 1",
+                [number],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            ).optional()?;
+            return match_in_history
+                .map(|(document, date)| {
+                    let session: Session = serde_json::from_str(&document)?;
+                    let mut record = json!(session);
+                    record["historyId"] = json!(number);
+                    record["historyDate"] = json!(date);
+                    Ok(record)
+                })
+                .transpose();
+        }
+        if live_only && !self.live_ids.contains_key(id) {
+            return Ok(None);
+        }
+        Ok(self.get(id)?.map(|session| self.capture_record(&session)))
+    }
+
+    pub(crate) fn search_captures(&self, query: &str, live_only: bool) -> Result<Vec<Value>> {
+        let folded = query.to_lowercase();
+        let mut records: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|session| self.capture_record(session))
+            .filter(|record| record.to_string().to_lowercase().contains(&folded))
+            .collect();
+        if self.desktop_updates.is_some() {
+            let mut statement = self.db.prepare(
+                "SELECT document FROM sessions WHERE archived = 0
+                 AND (?1 = '' OR instr(lower(document), lower(?1)) > 0)
+                 ORDER BY started_at DESC, rowid DESC LIMIT ?2",
+            )?;
+            let mut rows = statement.query(params![query, self.limit as i64])?;
+            let mut seen: BTreeSet<String> = records
+                .iter()
+                .map(|record| record["id"].as_str().unwrap().to_owned())
+                .collect();
+            while let Some(row) = rows.next()? {
+                let document = row.get_ref(0)?.as_str().map_err(crate::wire::Error::bad)?;
+                let session: Session = serde_json::from_str(document)?;
+                if seen.insert(session.id.clone()) {
+                    records.push(self.capture_record(&session));
+                }
+            }
+            records.sort_by(|a, b| b["startedAt"].as_str().cmp(&a["startedAt"].as_str()));
+            records.truncate(self.limit);
+        }
+        if records.is_empty() && !live_only {
+            records = self
+                .search(0, 200, query)?
+                .iter()
+                .map(|session| json!(session))
+                .collect();
+        }
+        Ok(records)
     }
 
     pub(crate) fn desktop_history_page(
@@ -445,6 +569,30 @@ mod tests {
         assert_eq!(initial.rows.len(), 207);
         assert_eq!(initial.rows["oldest"].status, 200);
         assert!(initial.rows["private"].incognito);
+        assert!(
+            !history
+                .sessions
+                .iter()
+                .any(|session| session.id == oldest.id)
+        );
+        let live_id = initial.rows["oldest"].live_id.unwrap();
+        let record = history
+            .find_capture(&live_id.to_string(), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record["id"], oldest.id);
+        assert_eq!(
+            history.search_captures("oldest", true).unwrap()[0]["id"],
+            oldest.id
+        );
+        let private_id = initial.rows["private"].live_id.unwrap();
+        assert_eq!(
+            history
+                .find_capture(&private_id.to_string(), true)
+                .unwrap()
+                .unwrap()["id"],
+            private.id
+        );
         let selected = history
             .prepare_history_delete(HistoryDeletion::Selected(vec![
                 oldest.id.clone(),
@@ -453,6 +601,17 @@ mod tests {
             .unwrap();
         assert_eq!((selected.count(), selected.active), (1, 1));
         assert_eq!(history.archive_captures("default", None).unwrap(), (206, 1));
+        assert!(
+            history
+                .find_capture(&live_id.to_string(), true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(history.search_captures("oldest", true).unwrap().is_empty());
+        assert_eq!(
+            history.search_captures("oldest", false).unwrap()[0]["id"],
+            oldest.id
+        );
         assert!(
             history
                 .take_capture_batch("default", false)

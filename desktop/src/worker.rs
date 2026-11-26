@@ -506,6 +506,7 @@ mod tests {
             rows,
         };
         let row = Row {
+            live_id: None,
             id: "one".into(),
             history_id: None,
             history_date: None,
