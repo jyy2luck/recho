@@ -73,8 +73,8 @@ impl TitleBar {
         )
     }
 
-    pub(super) fn icon(&self, ui: &mut Ui) {
-        ui.image((self.icon.id(), Vec2::splat(22.0)));
+    pub(super) fn icon(&self, ui: &mut Ui, size: f32) {
+        ui.image((self.icon.id(), Vec2::splat(size)));
     }
 
     pub(super) fn show(&self, ui: &mut Ui, row: Rect, menu_end: f32) {

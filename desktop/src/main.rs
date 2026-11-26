@@ -239,6 +239,8 @@ struct Recho {
     details_open: bool,
     sidebar_visible: bool,
     connection_open: bool,
+    #[cfg(not(target_os = "macos"))]
+    about_open: bool,
     error: Option<String>,
     history_error: Option<String>,
 }
@@ -350,6 +352,8 @@ impl Recho {
             details_open: false,
             sidebar_visible: true,
             connection_open: false,
+            #[cfg(not(target_os = "macos"))]
+            about_open: false,
             error: theme_error,
             history_error: None,
         }

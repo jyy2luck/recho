@@ -535,14 +535,16 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             }
                         });
                     }),
-                    ("帮助", |_, ui| {
-                        ui.label("recho 0.1.0 · Rust 桌面验证版");
-                        ui.label("核心抓包流程已接入；灰色入口尚未迁移。");
+                    ("帮助", |app, ui| {
+                        if ui.button("关于 recho").clicked() {
+                            app.about_open = true;
+                            ui.close();
+                        }
                     }),
                 ];
                 ui.horizontal_centered(|ui| {
                     #[cfg(windows)]
-                    app.title_bar.icon(ui);
+                    app.title_bar.icon(ui, 22.0);
                     #[cfg(not(windows))]
                     ui.label(RichText::new("recho").strong().color(colors.accent));
                     ui.add_space(2.0);
@@ -2274,6 +2276,25 @@ fn response_badge(
 }
 
 fn dialogs(app: &mut Recho, ctx: &egui::Context) {
+    #[cfg(not(target_os = "macos"))]
+    if app.about_open {
+        let modal = Theme::modal(ctx, egui::Id::new("about_recho")).show(ctx, |ui| {
+            ui.set_width(280.0);
+            let close = dialog_header(ui, "关于 recho", true);
+            ui.vertical_centered(|ui| {
+                ui.add_space(12.0);
+                #[cfg(windows)]
+                app.title_bar.icon(ui, 64.0);
+                ui.heading("recho");
+                ui.label(concat!("版本 ", env!("CARGO_PKG_VERSION")));
+                ui.add_space(16.0);
+            });
+            close
+        });
+        if modal.inner || modal.should_close() {
+            app.about_open = false;
+        }
+    }
     app.network.show(ctx, &app.worker);
     crate::capture_filter_ui::highlight_dialog(app, ctx);
     if app.connection_open {
