@@ -200,6 +200,7 @@ impl History {
         let db = Connection::open(&path)?;
         private_file(&path)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, started_at TEXT NOT NULL, document TEXT NOT NULL); CREATE INDEX IF NOT EXISTS sessions_started_at ON sessions(started_at DESC);")?;
+        Self::initialize_history_ids(&db)?;
         let history = Self {
             db,
             sessions: vec![],

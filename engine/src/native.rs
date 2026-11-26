@@ -41,6 +41,8 @@ impl Phase {
 #[derive(Clone, Debug)]
 pub struct Row {
     pub id: String,
+    pub history_date: Option<String>,
+    pub history_id: Option<u64>,
     pub method: String,
     pub url: String,
     pub status: u16,
@@ -64,6 +66,8 @@ impl From<&crate::storage::Session> for Row {
     fn from(session: &crate::storage::Session) -> Self {
         Self {
             id: session.id.clone(),
+            history_date: None,
+            history_id: None,
             method: session.method.clone(),
             url: session.url.clone(),
             status: session.status,

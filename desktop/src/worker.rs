@@ -507,6 +507,8 @@ mod tests {
         };
         let row = Row {
             id: "one".into(),
+            history_id: None,
+            history_date: None,
             method: "GET".into(),
             url: "http://localhost".into(),
             status: 200,

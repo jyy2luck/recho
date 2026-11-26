@@ -1499,6 +1499,26 @@ impl Engine {
                     }
                     Ok(response)
                 }
+                ("GET", "/history/by-id") => {
+                    let mut query = url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes());
+                    let date = query.clone()
+                        .find(|(key, _)| key == "date")
+                        .map(|(_, value)| value)
+                        .filter(|date| {
+                            date.len() == 10 && chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                                .is_ok_and(|parsed| parsed.to_string() == date.as_ref())
+                        })
+                        .ok_or_else(|| Error::bad("date must be a valid YYYY-MM-DD date"))?;
+                    let id = query
+                        .find(|(key, _)| key == "id")
+                        .and_then(|(_, value)| value.parse::<u64>().ok())
+                        .filter(|id| (1..=i64::MAX as u64).contains(id))
+                        .ok_or_else(|| Error::bad("id must be a positive history ID"))?;
+                    let session = self.history.lock().unwrap()
+                        .get_by_history_id(&date, id)?
+                        .ok_or_else(|| Error::new(404, "No history record matches that date and ID"))?;
+                    Ok(json_reply(200, json!(session)))
+                }
                 ("GET", path) if path.starts_with("/history/") => {
                     let session = self.history.lock().unwrap()
                         .get(path.trim_start_matches("/history/"))?

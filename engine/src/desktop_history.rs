@@ -50,8 +50,33 @@ struct LegacySpace {
 }
 
 const GROUP: &str = "COALESCE(NULLIF(json_extract(document, '$.captureGroup'), ''), 'default')";
+const HISTORY_DATE: &str = "COALESCE(history_ids.day, date(sessions.started_at, 'localtime'))";
 
 impl History {
+    pub(super) fn initialize_history_ids(db: &Connection) -> Result<()> {
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE IF NOT EXISTS history_sequences (day TEXT PRIMARY KEY, last_id INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS history_ids (
+                 session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+                 day TEXT NOT NULL,
+                 number INTEGER NOT NULL,
+                 UNIQUE(day, number)
+             );
+             CREATE TRIGGER IF NOT EXISTS assign_history_id AFTER INSERT ON sessions
+             WHEN date(NEW.started_at, 'localtime') IS NOT NULL
+             BEGIN
+                 INSERT INTO history_sequences (day, last_id)
+                     VALUES (date(NEW.started_at, 'localtime'), 1)
+                     ON CONFLICT(day) DO UPDATE SET last_id = last_id + 1;
+                 INSERT INTO history_ids (session_id, day, number)
+                     SELECT NEW.id, day, last_id FROM history_sequences
+                     WHERE day = date(NEW.started_at, 'localtime');
+             END;",
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn enable_desktop_captures(&mut self) -> Result<()> {
         let has_archive = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'archived')",
@@ -234,10 +259,11 @@ impl History {
     ) -> Result<HistoryPage> {
         let days = self
             .db
-            .prepare(
-                "SELECT date(started_at, 'localtime') AS day, count(*) FROM sessions
-             WHERE day IS NOT NULL GROUP BY day ORDER BY day DESC",
-            )?
+            .prepare(&format!(
+                "SELECT {HISTORY_DATE} AS history_date, count(*) FROM sessions
+                 LEFT JOIN history_ids ON sessions.id = history_ids.session_id
+                 WHERE {HISTORY_DATE} IS NOT NULL GROUP BY history_date ORDER BY history_date DESC",
+            ))?
             .query_map([], |row| {
                 Ok(HistoryDay {
                     date: row.get(0)?,
@@ -245,12 +271,13 @@ impl History {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
-        let mut statement = self.db.prepare(
-            "SELECT document FROM sessions
-             WHERE (?1 IS NULL OR date(started_at, 'localtime') = ?1)
+        let mut statement = self.db.prepare(&format!(
+            "SELECT document, {HISTORY_DATE}, history_ids.number FROM sessions
+             LEFT JOIN history_ids ON sessions.id = history_ids.session_id
+             WHERE (?1 IS NULL OR {HISTORY_DATE} = ?1)
              AND (?2 = '' OR instr(lower(document), lower(?2)) > 0)
-             ORDER BY started_at DESC, rowid DESC LIMIT 100 OFFSET ?3",
-        )?;
+             ORDER BY started_at DESC, sessions.rowid DESC LIMIT 100 OFFSET ?3",
+        ))?;
         let mut result = statement.query(params![date, query, offset as i64])?;
         let mut rows = Vec::new();
         while let Some(record) = result.next()? {
@@ -258,9 +285,25 @@ impl History {
                 .get_ref(0)?
                 .as_str()
                 .map_err(crate::wire::Error::bad)?;
-            rows.push(Row::from(&serde_json::from_str::<Session>(document)?));
+            let mut row = Row::from(&serde_json::from_str::<Session>(document)?);
+            row.history_date = record.get(1)?;
+            row.history_id = record.get(2)?;
+            rows.push(row);
         }
         Ok(HistoryPage { rows, days })
+    }
+
+    pub(crate) fn get_by_history_id(&self, date: &str, id: u64) -> Result<Option<Session>> {
+        let document: Option<String> = self
+            .db
+            .query_row(
+                "SELECT document FROM history_ids JOIN sessions ON sessions.id = history_ids.session_id
+                 WHERE day = ? AND number = ?",
+                params![date, id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(document.as_deref().map(serde_json::from_str).transpose()?)
     }
 
     pub(crate) fn prepare_history_delete(
@@ -268,11 +311,13 @@ impl History {
         target: HistoryDeletion,
     ) -> Result<HistoryDeletePlan> {
         let (field, parameters) = match &target {
-            HistoryDeletion::Selected(ids) => ("id", ids),
-            HistoryDeletion::Dates(dates) => ("date(started_at, 'localtime')", dates),
+            HistoryDeletion::Selected(ids) => ("sessions.id", ids),
+            HistoryDeletion::Dates(dates) => (HISTORY_DATE, dates),
         };
         let mut statement = self.db.prepare(&format!(
-            "SELECT id, archived FROM sessions WHERE {field} IN (SELECT value FROM json_each(?1))"
+            "SELECT sessions.id, archived FROM sessions
+             LEFT JOIN history_ids ON sessions.id = history_ids.session_id
+             WHERE {field} IN (SELECT value FROM json_each(?1))"
         ))?;
         let mut rows = statement.query([serde_json::to_string(parameters)?])?;
         let mut ids = Vec::new();
@@ -316,6 +361,60 @@ mod tests {
             started_at: started_at.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn history_ids_increment_after_reopen_and_keep_their_date_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(dir.path(), 200).unwrap();
+        let time = "2026-11-25T12:00:00.000Z";
+        for id in ["first", "second"] {
+            history.insert(&capture(id, "default", time));
+        }
+
+        let first_page = history.desktop_history_page(None, 0, "").unwrap();
+        let date = &first_page.days[0].date;
+        assert_eq!(first_page.rows[0].id, "second");
+        assert_eq!(first_page.rows[0].history_date.as_ref(), Some(date));
+        assert_eq!(first_page.rows[0].history_id, Some(2));
+        assert_eq!(first_page.rows[1].history_id, Some(1));
+
+        let later = capture("third", "default", time);
+        history.insert(&later);
+        let page = history.desktop_history_page(Some(date), 0, "").unwrap();
+        assert_eq!(page.rows[0].history_id, Some(3));
+        let next_page = history.desktop_history_page(Some(date), 1, "").unwrap();
+        assert_eq!(next_page.rows[0].history_id, Some(2));
+        let filtered = history
+            .desktop_history_page(Some(date), 0, "/first")
+            .unwrap();
+        assert_eq!(filtered.rows[0].history_id, Some(1));
+        history.delete(&later.id).unwrap();
+        drop(history);
+
+        let mut history = History::open(dir.path(), 200).unwrap();
+        history
+            .import_records(vec![
+                (capture("imported", "default", time), None, None),
+                (
+                    capture("next-day", "default", "2026-11-26T12:00:00.000Z"),
+                    None,
+                    None,
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            history.get_by_history_id(date, 1).unwrap().unwrap().id,
+            "first"
+        );
+        assert!(history.get_by_history_id(date, 3).unwrap().is_none());
+        assert_eq!(
+            history.get_by_history_id(date, 4).unwrap().unwrap().id,
+            "imported"
+        );
+        let page = history.desktop_history_page(None, 0, "/next-day").unwrap();
+        assert_ne!(page.rows[0].history_date.as_ref(), Some(date));
+        assert_eq!(page.rows[0].history_id, Some(1));
     }
 
     #[test]

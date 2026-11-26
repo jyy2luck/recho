@@ -493,17 +493,22 @@ impl Recho {
         self.network.open(section);
     }
     fn load_history(&mut self, offset: usize) {
-        match self.worker.history(
+        self.history_rows.clear();
+        self.history_loaded = false;
+        self.history_load = match self.worker.history(
             offset,
             self.history_query.trim().into(),
             self.history_date.clone(),
         ) {
             Ok(request) => {
                 self.history_offset = offset;
-                self.history_load = Some(request);
+                Some(request)
             }
-            Err(error) => self.error = Some(error),
-        }
+            Err(error) => {
+                self.error = Some(error);
+                None
+            }
+        };
     }
 
     fn prepare_history_delete(&mut self, target: HistoryDeletion) {

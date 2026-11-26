@@ -2410,6 +2410,8 @@ mod tests {
     fn pasting_capture_curl_imports_request_fields() {
         let row = Row {
             id: "capture".into(),
+            history_id: None,
+            history_date: None,
             method: "PATCH".into(),
             url: "https://example.test/items?tag=%2F".into(),
             status: 200,

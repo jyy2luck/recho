@@ -1475,6 +1475,7 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
 fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     let colors = app.theme.palette(ui.ctx());
     let history = app.navigation == Navigation::History;
+    let all_history_dates = history && app.history_date.is_none();
     let focus_id = ui.make_persistent_id(("capture_focus", history));
     if !history
         && ui.memory(|memory| memory.focused().is_none() || memory.has_focus(focus_id))
@@ -1577,14 +1578,19 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
             } else {
                 egui::Color32::from_rgb(0, 104, 117)
             };
+            let (table_id, id_width) = if all_history_dates {
+                ("all_history_dates", 132.0)
+            } else {
+                ("captures", 48.0)
+            };
             let table = TableBuilder::new(ui)
-                .id_salt(("captures", history))
+                .id_salt((table_id, history))
                 .resizable(true)
                 .striped(true)
                 .sense(egui::Sense::click())
                 .auto_shrink([false, false])
                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                .column(Column::initial(48.0).clip(true))
+                .column(Column::initial(id_width).clip(true))
                 .column(Column::initial(36.0).clip(true))
                 .column(Column::initial(80.0).clip(true))
                 .column(
@@ -1606,7 +1612,11 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
             table
                 .header(28.0, |mut row| {
                     for (index, title) in [
-                        "ID",
+                        if all_history_dates {
+                            "日期 / ID"
+                        } else {
+                            "ID"
+                        },
                         "图标",
                         "方法",
                         "URL",
@@ -1663,7 +1673,13 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         };
                         let cells = [
                             if history {
-                                (app.history_offset + table_row.index() + 1).to_string()
+                                match (row.history_id, row.history_date.as_deref()) {
+                                    (Some(id), Some(date)) if all_history_dates => {
+                                        format!("{date} / {id}")
+                                    }
+                                    (Some(id), _) => id.to_string(),
+                                    _ => "—".into(),
+                                }
                             } else {
                                 app.sequence.get(&row.id).unwrap_or(&0).to_string()
                             },

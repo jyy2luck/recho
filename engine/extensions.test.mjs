@@ -314,7 +314,7 @@ test('MCP HTTP shares tools, remains local and uncaptured, and works while captu
   const notification = await send({ jsonrpc: '2.0', method: 'notifications/initialized' });
   assert.equal(notification.status, 202); assert.equal(notification.value, null);
   const tools = (await rpc('tools/list')).value.result.tools;
-  assert.equal(tools.length, 62); assert.ok(tools.some(tool => tool.name === 'rule_update'));
+  assert.equal(tools.length, 63); assert.ok(tools.some(tool => tool.name === 'rule_update'));
   assert.equal((await call('settings_update', { settings: { breakpointEnabled: false } })).isError, false);
   assert.equal((await api('/settings')).value.breakpointEnabled, false);
   assert.equal((await call('settings_get')).isError, false);
@@ -444,12 +444,13 @@ test('MCP helper requires explicit credentials, validates options and enforces m
   const minimal = mcpClient(t, directory, token);
   assert.equal((await minimal('initialize')).result.serverInfo.name, 'recho');
   const tools = (await minimal('tools/list')).result.tools;
-  assert.ok(tools.length > 0 && tools.length < 62);
+  assert.ok(tools.length > 0 && tools.length < 63);
   assert.ok(tools.some(tool => tool.name === 'capture_live_status'));
+  assert.ok(tools.some(tool => tool.name === 'history_get_by_id'));
   assert.equal(tools.some(tool => tool.name === 'capture_live_clear'), false);
   assert.equal((await minimal('tools/call', { name: 'capture_live_clear', arguments: {} })).error.code, -32602);
   const all = mcpClient(t, directory, token, ['--scope', 'all']);
-  assert.equal((await all('tools/list')).result.tools.length, 62);
+  assert.equal((await all('tools/list')).result.tools.length, 63);
   assert.equal((await all(7)).error.code, -32600);
   assert.equal((await all('tools/call', [])).error.code, -32602);
   assert.equal((await all('tools/call', { name: 'settings_update', arguments: { settings: { mcpRemoteEnabled: true } } })).result.isError, true);

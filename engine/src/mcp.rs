@@ -388,6 +388,16 @@ fn tools() -> Value {
             false,
         ),
         (
+            "history_get_by_id",
+            "Get a saved request by its date and numeric ID as displayed on the desktop History page",
+            schema(
+                json!({"date":{"type":"string","format":"date","description":"Local date shown in the History sidebar (YYYY-MM-DD)"},"id":{"type":"integer","minimum":1,"description":"Numeric ID shown for that date"}}),
+                &["date", "id"],
+            ),
+            true,
+            false,
+        ),
+        (
             "history_delete",
             "Delete one saved request by ID",
             schema(json!({"id":string}), &["id"]),
@@ -904,6 +914,15 @@ async fn call_tool(directory: &Path, name: &str, args: &Value) -> Result<Value> 
                 .finish();
             api(directory, "GET", &format!("/history?{query}"), None).await
         }
+        "history_get_by_id" => {
+            let date = text_arg(args, "date")?;
+            let id = args["id"].as_u64().unwrap();
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("date", date)
+                .append_pair("id", &id.to_string())
+                .finish();
+            api(directory, "GET", &format!("/history/by-id?{query}"), None).await
+        }
         "history_delete" => {
             api(
                 directory,
@@ -1025,6 +1044,7 @@ impl Scope {
                     | "capture_live_filter"
                     | "capture_live_get_by_id"
                     | "history_list"
+                    | "history_get_by_id"
                     | "capture_live_set_enabled"
                     | "http_request"
                     | "rules_list"
@@ -1068,7 +1088,7 @@ pub async fn dispatch(message: Value, scope: Scope, directory: &Path) -> Option<
             } else {
                 HTTP_PROTOCOLS.last().unwrap()
             };
-            json!({"protocolVersion":protocol,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":crate::identity::SLUG,"version":env!("CARGO_PKG_VERSION")},"instructions":"Debug the connected Recho instance. Keep the target application running. API requests can change remote services; use only user-authorized destinations. Use history_list with query/offset/limit to search saved requests; capture_live_filter only searches the live buffer. Retrieve saved details with capture_live_get_by_id using session.id (UUID), not the UI row number."})
+            json!({"protocolVersion":protocol,"capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":crate::identity::SLUG,"version":env!("CARGO_PKG_VERSION")},"instructions":"Debug the connected Recho instance. Keep the target application running. API requests can change remote services; use only user-authorized destinations. Use history_list with query/offset/limit to search saved requests; capture_live_filter only searches the live buffer. Use history_get_by_id with the date and numeric ID shown on the History page. Look up a session UUID with capture_live_get_by_id."})
         }
         "ping" => json!({}),
         "tools/list" => {
@@ -1370,29 +1390,34 @@ mod tests {
         .unwrap()
         .unwrap();
         origin_task.await.unwrap();
+        let date = chrono::DateTime::parse_from_rfc3339(capture["startedAt"].as_str().unwrap())
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .date_naive()
+            .to_string();
         let endpoint = url::Url::parse(&format!(
             "http://127.0.0.1:{}/mcp?scope=minimal",
             running.ready["proxyPort"]
         ))
         .unwrap();
-        let mut responses = Vec::new();
+        let call = |name: &'static str, arguments: Value| {
+            let endpoint = &endpoint;
+            let token = &tokens.items[0].token;
+            async move {
+                request_json(
+                    endpoint, token, "POST",
+                    Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})),
+                ).await.unwrap().unwrap()["result"].clone()
+            }
+        };
         for (name, arguments) in [
             ("capture_live_status", json!({})),
             ("capture_live_filter", json!({"query":url})),
             ("capture_live_get_by_id", json!({"id":capture["id"]})),
+            ("history_get_by_id", json!({"date":date,"id":1})),
         ] {
-            let response = request_json(
-                &endpoint,
-                &tokens.items[0].token,
-                "POST",
-                Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})),
-            ).await.unwrap().unwrap();
-            responses.push((name, response));
-        }
-        running.stop().await;
-        for (name, response) in responses {
-            let result = &response["result"];
-            assert_eq!(result["isError"], false, "{name}: {response}");
+            let result = call(name, arguments).await;
+            assert_eq!(result["isError"], false, "{name}: {result}");
             let value: Value =
                 serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
             let record = match name {
@@ -1404,6 +1429,18 @@ mod tests {
             assert_eq!(record["url"], url, "{name}");
             assert_eq!(record["status"], 200, "{name}");
         }
+        for (query, status) in [
+            ("date=2026-02-30&id=1".to_owned(), 400),
+            (format!("date={date}&id=0"), 400),
+            (format!("date={date}&id=2"), 404),
+        ] {
+            let target = control.join(&format!("/history/by-id?{query}")).unwrap();
+            let error = request_json(&target, "embedded-control-test", "GET", None)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, status, "{query}: {error}");
+        }
+        running.stop().await;
     }
 
     #[tokio::test]
