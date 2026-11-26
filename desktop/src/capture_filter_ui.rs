@@ -1,6 +1,6 @@
 use crate::{
     Recho,
-    theme::{CONTROL_HEIGHT, Theme, input_text},
+    theme::{CONTROL_HEIGHT, Theme, control_row, input_text},
     workbench::icon,
 };
 use eframe::egui;
@@ -29,6 +29,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             let mut changed = rows(ui, draft, height, false);
             if draft.items.len() > 1 {
                 ui.horizontal(|ui| {
+                    control_row(ui);
                     ui.add_space(32.0);
                     changed |= combination(ui, draft);
                     if ui
@@ -75,10 +76,11 @@ pub(super) fn highlight_dialog(app: &mut Recho, ctx: &egui::Context) {
     };
     let mut opened = true;
     let mut save = false;
-    egui::Window::new("自动高亮")
+    Theme::compact_window(ctx, "自动高亮")
         .open(&mut opened)
         .default_width(640.0)
         .show(ctx, |ui| {
+            control_row(ui);
             ui.horizontal(|ui| {
                 ui.label("高亮");
                 egui::ComboBox::from_id_salt("highlight_color")
@@ -112,17 +114,18 @@ pub(super) fn highlight_dialog(app: &mut Recho, ctx: &egui::Context) {
 }
 
 fn combination(ui: &mut egui::Ui, conditions: &mut ConditionSet) -> bool {
-    let mut changed = false;
-    ui.group(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        changed |= ui
-            .selectable_value(&mut conditions.any, false, "全部条件 (AND)")
-            .changed();
-        changed |= ui
-            .selectable_value(&mut conditions.any, true, "任一条件 (OR)")
-            .changed();
-    });
-    changed
+    let colors = Theme::current_palette(ui.ctx());
+    colors
+        .input_frame()
+        .inner_margin(2)
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().interact_size.y = CONTROL_HEIGHT - 6.0;
+            let all = ui.selectable_value(&mut conditions.any, false, "全部条件 (AND)");
+            let any = ui.selectable_value(&mut conditions.any, true, "任一条件 (OR)");
+            all.changed() || any.changed()
+        })
+        .inner
 }
 
 fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight: bool) -> bool {
@@ -130,13 +133,13 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
     let mut remove = None;
     let mut add = false;
     let can_add = conditions.items.len() < MAX_CONDITIONS;
-    let width = ui.available_width().max(446.0);
     let colors = Theme::current_palette(ui.ctx());
     egui::ScrollArea::both()
         .id_salt("condition_rows")
         .auto_shrink([false, true])
         .max_height(height)
         .show(ui, |ui| {
+            let width = ui.available_width().max(446.0);
             ui.set_min_width(width);
             for (index, item) in conditions.items.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
@@ -144,6 +147,7 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
                         egui::vec2(width, CONTROL_HEIGHT),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
+                            control_row(ui);
                             let combo_height = ui
                                 .text_style_height(&egui::TextStyle::Button)
                                 .max(ui.spacing().icon_width);
@@ -151,7 +155,7 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
                                 egui::vec2(8.0, ((CONTROL_HEIGHT - combo_height) * 0.5).max(0.0));
                             StripBuilder::new(ui)
                                 .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                                .size(Size::exact(26.0))
+                                .size(Size::exact(CONTROL_HEIGHT))
                                 .size(Size::exact(98.0))
                                 .size(Size::exact(108.0))
                                 .size(Size::remainder())
@@ -169,11 +173,9 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
                                         changed |= enabled.changed();
                                     });
                                     row.cell(|ui| {
-                                        ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
                                         changed |= field_picker(ui, item, highlight);
                                     });
                                     row.cell(|ui| {
-                                        ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
                                         changed |= operator_picker(ui, item);
                                     });
                                     row.cell(|ui| changed |= condition_value(ui, item));
@@ -204,10 +206,11 @@ fn rows(ui: &mut egui::Ui, conditions: &mut ConditionSet, height: f32, highlight
 }
 
 fn row_button(ui: &mut egui::Ui, icon: &str, label: &str, enabled: bool) -> egui::Response {
+    ui.spacing_mut().button_padding.y = 0.0;
     let response = ui.add_enabled(
         enabled,
         egui::Button::new(egui::RichText::new(icon).size(16.0))
-            .min_size(egui::vec2(28.0, 28.0))
+            .min_size(egui::vec2(28.0, CONTROL_HEIGHT))
             .frame_when_inactive(false),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
@@ -260,6 +263,7 @@ fn condition_value(parent: &mut egui::Ui, item: &mut Condition) -> bool {
     let ui = &mut frame.content_ui;
     ui.set_min_size(egui::vec2(width, CONTROL_HEIGHT - 2.0));
     ui.spacing_mut().item_spacing.x = 4.0;
+    ui.spacing_mut().interact_size.y = CONTROL_HEIGHT - 8.0;
     ui.spacing_mut().button_padding = egui::vec2(4.0, 2.0);
     let changed = if item.field.choices().is_empty() {
         let supports_deep = item.field.supports_deep();
@@ -268,9 +272,7 @@ fn condition_value(parent: &mut egui::Ui, item: &mut Condition) -> bool {
         let value = ui.add(input_text(&mut item.value, "搜索内容", text_width).char_limit(4096));
         ui.ctx()
             .accesskit_node_builder(value.id, |node| node.set_label("搜索内容"));
-        if value.has_focus() {
-            frame.frame.stroke.color = colors.accent;
-        }
+        frame.frame.stroke = colors.input_stroke(&value);
         let mut changed = value.changed();
         if supports_deep {
             changed |= modifier(ui, icon("\u{e157}").size(16.0), &mut item.deep, "深度搜索");
@@ -293,8 +295,7 @@ fn condition_value(parent: &mut egui::Ui, item: &mut Condition) -> bool {
 fn modifier(ui: &mut egui::Ui, text: egui::RichText, selected: &mut bool, label: &str) -> bool {
     let response = ui.add(
         egui::Button::selectable(*selected, text)
-            .min_size(egui::vec2(MODIFIER_WIDTH, 24.0))
-            .frame_when_inactive(false),
+            .min_size(egui::vec2(MODIFIER_WIDTH, CONTROL_HEIGHT - 8.0)),
     );
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, *selected, label)
@@ -361,4 +362,79 @@ fn value_picker(ui: &mut egui::Ui, item: &mut Condition) -> bool {
     item.values = Some(values);
     item.restrict_operator();
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn condition_rows_scroll_only_when_they_overflow() {
+        for (width, count, scroll_x, scroll_y) in [
+            (640.0, 1, false, false),
+            (640.0, 4, false, true),
+            (380.0, 1, true, false),
+        ] {
+            let ctx = egui::Context::default();
+            Theme::default().apply(&ctx);
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "icons".into(),
+                std::sync::Arc::new(egui::FontData::from_static(include_bytes!(
+                    "../assets/fonts/MaterialIcons-Regular.ttf"
+                ))),
+            );
+            fonts
+                .families
+                .insert(egui::FontFamily::Name("icons".into()), vec!["icons".into()]);
+            ctx.set_fonts(fonts);
+            let mut conditions = ConditionSet {
+                items: vec![Condition::default(); count],
+                ..Default::default()
+            };
+            let mut id = egui::Id::NULL;
+            for delta in [egui::Vec2::ZERO, egui::vec2(-100.0, -100.0)] {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 240.0),
+                        )),
+                        events: vec![egui::Event::PointerMoved(egui::pos2(350.0, 16.0))],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        ui.input_mut(|input| input.smooth_scroll_delta = delta);
+                        id = ui.make_persistent_id(egui::IdSalt::new("condition_rows"));
+                        rows(ui, &mut conditions, 90.0, false);
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            let offset = egui::scroll_area::State::load(&ctx, id).unwrap().offset;
+            assert_eq!(offset.x > 0.0, scroll_x, "width {width}, offset {offset:?}");
+            assert_eq!(offset.y > 0.0, scroll_y, "count {count}, offset {offset:?}");
+        }
+    }
+
+    #[test]
+    fn modifier_shows_selection_without_hover() {
+        let ctx = egui::Context::default();
+        Theme::default().apply(&ctx);
+        for selected in [false, true] {
+            let mut enabled = selected;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                modifier(ui, egui::RichText::new("Aa"), &mut enabled, "区分大小写");
+            });
+            output.textures_delta.clear();
+            let selected_fill = Theme::current_palette(&ctx).selected;
+            assert_eq!(
+                output.shapes.iter().any(|shape| matches!(
+                    &shape.shape,
+                    egui::Shape::Rect(rect) if rect.fill == selected_fill
+                )),
+                selected,
+            );
+        }
+    }
 }

@@ -1,7 +1,7 @@
 mod breakpoint;
 mod editor;
 
-use crate::theme::Theme;
+use crate::theme::{Theme, dialog_columns, dialog_footer, dialog_header, input_text};
 use crate::worker::{RequestHandle, Worker};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -77,6 +77,7 @@ impl RuleCategory {
 
 #[derive(Default)]
 pub(super) struct RulesUi {
+    open: bool,
     category: RuleCategory,
     rules: Option<Vec<Value>>,
     rules_reply: Option<(RuleReply, RequestHandle)>,
@@ -110,6 +111,13 @@ enum RuleReply {
 
 impl RulesUi {
     pub(super) fn open(&mut self, category: RuleCategory) {
+        if !self.child_open() {
+            self.select_category(category);
+            self.open = true;
+        }
+    }
+
+    fn select_category(&mut self, category: RuleCategory) {
         if self.category != category {
             self.category = category;
             self.folder.clear();
@@ -117,11 +125,20 @@ impl RulesUi {
         }
     }
 
+    fn child_open(&self) -> bool {
+        self.editor.is_some()
+            || self.delete.is_some()
+            || self.new_folder.is_some()
+            || self.logs.is_some()
+            || self.file.is_some()
+            || self.breakpoint.is_some()
+    }
+
     pub(super) fn new_for_capture(&mut self, category: RuleCategory, method: &str, url: &str) {
-        if self.editor.is_some() {
+        if self.child_open() {
             return;
         }
-        self.open(category);
+        self.select_category(category);
         let mut value = new_rule(category, &self.folder);
         value["match"]["url"] = json!(url);
         value["match"]["method"] = json!(method);
@@ -259,28 +276,59 @@ impl RulesUi {
         }
     }
 
-    pub(super) fn show(&mut self, ui: &mut egui::Ui, worker: &Worker) {
+    fn rules_dialog(&mut self, ctx: &egui::Context, worker: &Worker) {
         if self.rules.is_none() && self.rules_reply.is_none() && self.error.is_none() {
             self.refresh(worker);
         }
+        let width = (ctx.content_rect().width() - 64.0).min(820.0);
+        let height = (ctx.content_rect().height() - 130.0).min(400.0);
+        let modal = Theme::modal(ctx, egui::Id::new("local_rules")).show(ctx, |ui| {
+            ui.set_width(width);
+            let close = dialog_header(ui, "本地规则", !self.child_open());
+            let current = self.category;
+            dialog_columns(
+                ui,
+                egui::vec2(width, height),
+                |ui| {
+                    let mut selected = current;
+                    for category in RuleCategory::CATEGORIES {
+                        if crate::workbench::sidebar_row(
+                            ui,
+                            category.label(),
+                            Some(category == current),
+                        )
+                        .clicked()
+                        {
+                            selected = category;
+                        }
+                    }
+                    selected
+                },
+                |ui, category| {
+                    if !self.child_open() {
+                        self.select_category(category);
+                    }
+                    self.show_list(ui, worker);
+                },
+            );
+            close
+        });
+        if !self.child_open() && (modal.inner || modal.should_close()) {
+            self.open = false;
+        }
+    }
+
+    fn show_list(&mut self, ui: &mut egui::Ui, worker: &Worker) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading("本地规则");
-            ui.separator();
-            for category in RuleCategory::CATEGORIES {
-                if ui
-                    .selectable_label(self.category == category, category.label())
-                    .clicked()
-                {
-                    self.open(category);
+            ui.strong(self.category.label());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("脚本控制台").clicked() {
+                    self.load_logs(worker);
                 }
-            }
-            ui.separator();
-            if ui.button("刷新规则").clicked() {
-                self.refresh(worker);
-            }
-            if ui.button("脚本控制台").clicked() {
-                self.load_logs(worker);
-            }
+                if ui.button("刷新规则").clicked() {
+                    self.refresh(worker);
+                }
+            });
         });
         ui.horizontal_wrapped(|ui| {
             for category in RuleCategory::CATEGORIES {
@@ -414,9 +462,18 @@ impl RulesUi {
                     });
                 });
         }
-        ui.add(
-            egui::TextEdit::singleline(&mut self.search).hint_text("搜索规则名称、文件夹或 URL"),
-        );
+        let colors = Theme::current_palette(ui.ctx());
+        let mut frame = colors.input_frame().begin(ui);
+        let width = frame.content_ui.available_width();
+        let hint = "搜索规则名称、文件夹或 URL";
+        let search = frame
+            .content_ui
+            .add(input_text(&mut self.search, hint, width));
+        search
+            .ctx
+            .accesskit_node_builder(search.id, |node| node.set_label(hint));
+        frame.frame.stroke = colors.input_stroke(&search);
+        frame.end(ui);
         let rules = self.rules.as_ref().unwrap();
         let search = self.search.to_lowercase();
         let visible = rules
@@ -591,6 +648,9 @@ impl RulesUi {
 
     pub(super) fn dialogs(&mut self, ctx: &egui::Context, worker: &Worker) {
         self.finish_file(worker);
+        if self.open {
+            self.rules_dialog(ctx, worker);
+        }
         if self.editor.is_some()
             && self.rules.is_none()
             && self.rules_reply.is_none()
@@ -633,11 +693,18 @@ impl RulesUi {
             self.save_editor(worker, value);
         }
         if let Some(item) = &self.delete {
+            let colors = Theme::current_palette(ctx);
             let reply = Theme::modal(ctx, egui::Id::new("delete_rule")).show(ctx, |ui| {
-                ui.heading("删除规则");
+                ui.set_width(340.0);
+                let close = dialog_header(ui, "删除规则", true);
                 ui.label(format!("确定删除「{}」？", label(&item["name"])));
-                ui.horizontal(|ui| (ui.button("取消").clicked(), ui.button("删除规则").clicked()))
-                    .inner
+                dialog_footer(ui, |ui| {
+                    let delete = ui
+                        .add(colors.dialog_action("删除规则", colors.red))
+                        .clicked();
+                    let cancel = ui.button("取消").clicked();
+                    (close || cancel, delete)
+                })
             });
             if reply.inner.1 {
                 if let Some(mut next) = self.rules.clone() {
@@ -706,20 +773,29 @@ impl RulesUi {
         let Some(name) = &mut self.new_folder else {
             return;
         };
+        let colors = Theme::current_palette(ctx);
         let reply = Theme::modal(ctx, egui::Id::new("add_rule_folder")).show(ctx, |ui| {
-            ui.heading("新建文件夹");
-            ui.add(egui::TextEdit::singleline(name).hint_text("文件夹名称或子路径"));
-            ui.horizontal(|ui| {
-                (
-                    ui.button("取消").clicked(),
-                    ui.add_enabled(
+            ui.set_width(340.0);
+            let close = dialog_header(ui, "新建文件夹", true);
+            let mut frame = colors.input_frame().begin(ui);
+            let width = frame.content_ui.available_width();
+            let hint = "文件夹名称或子路径";
+            let field = frame.content_ui.add(input_text(name, hint, width));
+            field
+                .ctx
+                .accesskit_node_builder(field.id, |node| node.set_label(hint));
+            frame.frame.stroke = colors.input_stroke(&field);
+            frame.end(ui);
+            dialog_footer(ui, |ui| {
+                let create = ui
+                    .add_enabled(
                         !name.trim_matches([' ', '/']).is_empty(),
-                        egui::Button::new("创建"),
+                        colors.dialog_action("创建", colors.accent),
                     )
-                    .clicked(),
-                )
+                    .clicked();
+                let cancel = ui.button("取消").clicked();
+                (close || cancel, create)
             })
-            .inner
         });
         if reply.inner.1 {
             if let Some(settings) = &self.settings {
@@ -749,7 +825,7 @@ impl RulesUi {
         let Some(logs) = &self.logs else { return };
         let reply = Theme::modal(ctx, egui::Id::new("rule_logs")).show(ctx, |ui| {
             ui.set_width(ctx.content_rect().width().min(740.0) - 48.0);
-            ui.heading("脚本控制台");
+            let close = dialog_header(ui, "脚本控制台", true);
             egui::ScrollArea::vertical()
                 .max_height(430.0)
                 .show(ui, |ui| {
@@ -767,8 +843,8 @@ impl RulesUi {
                         ui.weak("暂无脚本输出");
                     }
                 });
-            ui.horizontal(|ui| (ui.button("关闭").clicked(), ui.button("刷新").clicked()))
-                .inner
+            let refresh = dialog_footer(ui, |ui| ui.button("刷新").clicked());
+            (close, refresh)
         });
         if reply.inner.0 || reply.should_close() {
             self.logs = None;

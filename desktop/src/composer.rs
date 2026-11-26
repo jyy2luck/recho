@@ -1,6 +1,6 @@
 use crate::{
     body::{Content, hex_row, show_structured},
-    theme::{CONTROL_HEIGHT, Theme, input_text},
+    theme::{CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header, input_text},
     worker::{DetailHandle, RequestHandle, Worker},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -210,6 +210,17 @@ struct SaveTab {
     name: String,
     folder: String,
 }
+enum RenameTarget {
+    Collection(String),
+    Tab(String),
+}
+
+struct RenameRequest {
+    target: RenameTarget,
+    name: String,
+    focus: bool,
+}
+
 const CLIPBOARD_IMPORT: &str = "从剪贴板导入";
 
 struct Transfer {
@@ -238,6 +249,7 @@ pub(super) struct Composer {
     reply: Option<(String, Reply)>,
     errors: HashMap<String, String>,
     save_tab: Option<SaveTab>,
+    rename_request: Option<RenameRequest>,
     transfer: Option<Transfer>,
     environment_edit: Option<EnvironmentEdit>,
     new_folder: Option<String>,
@@ -476,6 +488,37 @@ impl Composer {
         self.select(id.clone());
         Some(id)
     }
+    fn open_collection_entry(&mut self, entry_id: &str) {
+        let Some(document) = &self.document else {
+            return;
+        };
+        if entry_id.is_empty() {
+            return;
+        }
+        if let Some(request) = rows(document, "requests")
+            .iter()
+            .filter(|request| text(request, "collectionEntryID") == entry_id)
+            .min_by_key(|request| text(request, "id") != self.active)
+        {
+            self.select(text(request, "id").into());
+            return;
+        }
+        let Some(entry) = rows(document, "collections")
+            .iter()
+            .find(|entry| text(entry, "id") == entry_id)
+        else {
+            return;
+        };
+        match normalized(&entry["request"]) {
+            Ok(mut request) => {
+                request["collectionEntryID"] = json!(entry_id);
+                self.add(request);
+            }
+            Err(error) => {
+                self.errors.insert(self.active.clone(), error);
+            }
+        }
+    }
     pub(super) fn open_new(&mut self) {
         self.add(draft("http"));
     }
@@ -688,34 +731,79 @@ impl Composer {
         let mut close = None;
         let mut duplicate = None;
         let mut save = None;
+        let accent = Theme::current_palette(ui.ctx()).accent;
         for (index, request) in requests.iter().enumerate() {
             let tab_id = text(request, "id");
             ui.push_id(tab_id, |ui| {
                 let selected = tab_id == self.active;
-                let dirty = modified(document, request);
-                let label = format!(
-                    "{}  {}{}",
-                    match text(request, "kind") {
-                        "rawHTTP" => "HTTP 报文",
-                        "websocket" => "WebSocket",
-                        "grpc" => "gRPC",
-                        "protobuf" => "Protobuf",
-                        _ => text(request, "method"),
-                    },
-                    name(request),
-                    if dirty { "  ●" } else { "" },
+                let unsaved = changes_since_save(document, request).unwrap_or(true);
+                let radius = 5;
+                let mut frame = egui::Frame::new()
+                    .corner_radius(radius)
+                    .inner_margin(egui::Margin {
+                        left: 7,
+                        right: 4,
+                        ..egui::Margin::ZERO
+                    })
+                    .begin(ui);
+                let response = frame.content_ui.add(
+                    egui::Button::selectable(selected, name(request))
+                        .frame(false)
+                        .wrap_mode(egui::TextWrapMode::Extend)
+                        .min_size([68.0, CONTROL_HEIGHT].into()),
                 );
-                let response =
-                    ui.add(egui::Button::selectable(selected, label).min_size([90.0, 30.0].into()));
+                if unsaved {
+                    let (rect, painter) = frame
+                        .content_ui
+                        .allocate_painter(egui::Vec2::splat(6.0), egui::Sense::hover());
+                    painter.circle_filled(rect.rect.center(), 2.5, accent);
+                    response
+                        .ctx
+                        .accesskit_node_builder(response.id, |node| node.set_description("未保存"));
+                }
+                let close_button = frame.content_ui.add(
+                    egui::Button::new("×")
+                        .small()
+                        .frame(false)
+                        .min_size([22.0, 22.0].into()),
+                );
+                let tab_rect = frame.allocate_space(ui).rect;
+                let hovered = ui.rect_contains_pointer(tab_rect);
+                if selected || hovered {
+                    frame.frame.fill = ui.visuals().selection.bg_fill;
+                }
+                frame.paint(ui);
+                let outline = if hovered || response.has_focus() {
+                    Some(tab_rect)
+                } else {
+                    close_button.has_focus().then_some(close_button.rect)
+                };
+                if let Some(outline) = outline {
+                    ui.painter().rect_stroke(
+                        outline,
+                        radius,
+                        ui.visuals().widgets.hovered.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                close_button
+                    .ctx
+                    .accesskit_node_builder(close_button.id, |node| node.set_label("关闭请求"));
                 if response.clicked() {
                     selection = Some(tab_id.to_string());
                 }
-                if response.middle_clicked()
-                    || ui.small_button("×").on_hover_text("关闭请求").clicked()
-                {
+                if response.middle_clicked() || close_button.clicked() {
                     close = Some((index, false));
                 }
                 response.context_menu(|ui| {
+                    if ui.button("重命名").clicked() {
+                        self.rename_request = Some(RenameRequest {
+                            target: RenameTarget::Tab(tab_id.into()),
+                            name: name(request).into(),
+                            focus: true,
+                        });
+                        ui.close();
+                    }
                     for (caption, copy) in [("保存 API", false), ("另存 API", true)] {
                         if ui.button(caption).clicked() {
                             save = Some((index, copy));
@@ -859,6 +947,43 @@ impl Composer {
             self.close_after_archive = Some(save.id);
         }
     }
+    fn apply_rename(&mut self, target: &RenameTarget, name: &str) {
+        let Some(document) = &mut self.document else {
+            return;
+        };
+        let name = json!(name);
+        let entry_id = match target {
+            RenameTarget::Collection(id) => id.clone(),
+            RenameTarget::Tab(id) => {
+                let Some(tab) = rows_mut(document, "requests")
+                    .iter_mut()
+                    .find(|request| text(request, "id") == id)
+                else {
+                    return;
+                };
+                tab["name"] = name.clone();
+                text(tab, "collectionEntryID").to_owned()
+            }
+        };
+        if !entry_id.is_empty()
+            && let Some(request) = rows_mut(document, "collections")
+                .iter_mut()
+                .find(|entry| text(entry, "id") == entry_id)
+                .and_then(|entry| entry.get_mut("request"))
+                .and_then(Value::as_object_mut)
+        {
+            let previous = request
+                .insert("name".into(), name.clone())
+                .unwrap_or_default();
+            for tab in rows_mut(document, "requests")
+                .iter_mut()
+                .filter(|tab| text(tab, "collectionEntryID") == entry_id && tab["name"] == previous)
+            {
+                tab["name"] = name.clone();
+            }
+        }
+        self.mark_dirty();
+    }
     fn environments(doc: &Value) -> Map<String, Value> {
         let env_id = text(doc, "activeEnvironmentID");
         rows(doc, "environments")
@@ -957,66 +1082,75 @@ impl Composer {
         let request = &mut rows_mut(document, "requests")[index];
         let raw = text(request, "kind") == "rawHTTP";
         ui.push_id(&self.active, |ui| {
-            ui.horizontal(|ui| {
-                changed |= line(ui, request, "name", "请求名称", 156.0).changed();
-                if !raw {
-                    changed |= choice(ui, request, "protocolVersion", "HTTP 协议版本", &VERSIONS);
-                }
-                egui::ComboBox::from_id_salt("request_environment")
-                    .selected_text(
-                        environments
-                            .iter()
-                            .find(|(id, _)| id == &active_env)
-                            .map_or("无环境", |(_, name)| name.as_str()),
-                    )
-                    .show_ui(ui, |ui| {
-                        changed |= ui
-                            .selectable_value(&mut active_env, String::new(), "无环境")
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), CONTROL_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    control_row(ui);
+                    let name_id = ui.make_persistent_id("request_name");
+                    changed |=
+                        request_input(ui, name_id, object_text(request, "name"), "请求名称", 156.0)
                             .changed();
-                        for (id, name) in &environments {
+                    if !raw {
+                        changed |=
+                            choice(ui, request, "protocolVersion", "HTTP 协议版本", &VERSIONS);
+                    }
+                    egui::ComboBox::from_id_salt("request_environment")
+                        .selected_text(
+                            environments
+                                .iter()
+                                .find(|(id, _)| id == &active_env)
+                                .map_or("无环境", |(_, name)| name.as_str()),
+                        )
+                        .show_ui(ui, |ui| {
                             changed |= ui
-                                .selectable_value(&mut active_env, id.clone(), name)
+                                .selectable_value(&mut active_env, String::new(), "无环境")
                                 .changed();
-                        }
-                    });
-                setup_environment = ui.small_button("管理环境").clicked();
-                saving = ui.button("保存 API").clicked()
-                    || ui.input_mut(|input| {
-                        input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
-                    });
-                ui.menu_button("请求操作", |ui| {
-                    if !raw && ui.button("导入 cURL").clicked() {
-                        draft_import = Some("导入 cURL");
-                        ui.close();
-                    }
-                    if !raw && ui.button("复制为 cURL").clicked() {
-                        match curl(request, &variables) {
-                            Ok(command) => ui.ctx().copy_text(command),
-                            Err(error) => {
-                                self.errors.insert(self.active.clone(), error);
+                            for (id, name) in &environments {
+                                changed |= ui
+                                    .selectable_value(&mut active_env, id.clone(), name)
+                                    .changed();
                             }
+                        });
+                    setup_environment = ui.button("管理环境").clicked();
+                    saving = ui.button("保存 API").clicked()
+                        || ui.input_mut(|input| {
+                            input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
+                        });
+                    ui.menu_button("请求操作", |ui| {
+                        if !raw && ui.button("导入 cURL").clicked() {
+                            draft_import = Some("导入 cURL");
+                            ui.close();
                         }
-                        ui.close();
-                    }
-                    if ui.button("复制请求 JSON").clicked() {
-                        ui.ctx().copy_text(
-                            serde_json::to_string_pretty(&content_fields(request.clone()))
-                                .unwrap_or_default(),
-                        );
-                        ui.close();
-                    }
-                    if ui.button("导入请求 JSON").clicked() {
-                        draft_import = Some("导入请求 JSON");
-                        ui.close();
-                    }
-                });
-            });
+                        if !raw && ui.button("复制为 cURL").clicked() {
+                            match curl(request, &variables) {
+                                Ok(command) => ui.ctx().copy_text(command),
+                                Err(error) => {
+                                    self.errors.insert(self.active.clone(), error);
+                                }
+                            }
+                            ui.close();
+                        }
+                        if ui.button("复制请求 JSON").clicked() {
+                            ui.ctx().copy_text(
+                                serde_json::to_string_pretty(&content_fields(request.clone()))
+                                    .unwrap_or_default(),
+                            );
+                            ui.close();
+                        }
+                        if ui.button("导入请求 JSON").clicked() {
+                            draft_import = Some("导入请求 JSON");
+                            ui.close();
+                        }
+                    });
+                },
+            );
             ui.separator();
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), CONTROL_HEIGHT),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                    control_row(ui);
                     if !raw {
                         changed |= choice(ui, request, "method", "请求方法", &METHODS);
                     }
@@ -1251,9 +1385,17 @@ impl Composer {
                                         )
                                         .on_hover_text(name(request));
                                         if item.clicked() {
-                                            open_saved = Some(entry.clone());
+                                            open_saved = Some(id.to_owned());
                                         }
                                         item.context_menu(|ui| {
+                                            if ui.button("重命名").clicked() {
+                                                self.rename_request = Some(RenameRequest {
+                                                    target: RenameTarget::Collection(id.into()),
+                                                    name: name(request).into(),
+                                                    focus: true,
+                                                });
+                                                ui.close();
+                                            }
                                             if ui.button("删除 API").clicked() {
                                                 delete_saved = Some(id.to_string());
                                                 ui.close();
@@ -1298,18 +1440,8 @@ impl Composer {
         if let Some(id) = edit_env {
             self.edit_environment(Some(&id));
         }
-        if let Some(entry) = open_saved {
-            match normalized(&entry["request"]) {
-                Ok(mut request) => {
-                    request["collectionEntryID"] = entry["id"].clone();
-                    self.add(request);
-                }
-                Err(error) => self
-                    .errors
-                    .insert(self.active.clone(), error)
-                    .map(drop)
-                    .unwrap_or_default(),
-            }
+        if let Some(entry_id) = open_saved {
+            self.open_collection_entry(&entry_id);
         }
     }
     pub(super) fn show_specifications(&mut self, ui: &mut egui::Ui) {
@@ -1382,12 +1514,46 @@ impl Composer {
         });
     }
     pub(super) fn show_dialogs(&mut self, ctx: &egui::Context, worker: &Worker) {
+        if let Some(mut rename) = self.rename_request.take() {
+            let colors = Theme::current_palette(ctx);
+            let modal = Theme::modal(ctx, egui::Id::new("rename_request")).show(ctx, |ui| {
+                ui.set_width(340.0);
+                let close = dialog_header(ui, "重命名", true);
+                let field = request_input(
+                    ui,
+                    ui.make_persistent_id("request_name"),
+                    &mut rename.name,
+                    "名称",
+                    ui.available_width(),
+                );
+                if std::mem::take(&mut rename.focus) {
+                    field.request_focus();
+                }
+                let valid = !rename.name.trim().is_empty();
+                dialog_footer(ui, |ui| {
+                    let confirm = ui
+                        .add_enabled(valid, colors.dialog_action("确定", colors.accent))
+                        .clicked()
+                        || (valid
+                            && field.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    let cancel = ui.button("取消").clicked();
+                    (confirm, close || cancel)
+                })
+            });
+            if modal.inner.0 {
+                self.apply_rename(&rename.target, rename.name.trim());
+                self.save_archive(worker);
+            } else if !modal.inner.1 && !modal.should_close() {
+                self.rename_request = Some(rename);
+            }
+        }
         if let Some(mut save) = self.save_tab.take() {
             let mut outcome = None;
             let mut cancelled = false;
             let mut open = true;
             let folders = folders(self.document.as_ref().unwrap_or(&Value::Null));
-            egui::Window::new("保存 API")
+            Theme::compact_window(ctx, "保存 API")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -1451,7 +1617,7 @@ impl Composer {
             let mut open = true;
             let mut parsed = None;
             let mut cancel = false;
-            egui::Window::new(item.kind)
+            Theme::compact_window(ctx, item.kind)
                 .open(&mut open)
                 .collapsible(false)
                 .default_width(580.0)
@@ -1510,7 +1676,7 @@ impl Composer {
                     .iter()
                     .any(|row| text(row, "id") == env_id)
             });
-            egui::Window::new("编辑环境变量")
+            Theme::compact_window(ctx, "编辑环境变量")
                 .open(&mut open)
                 .collapsible(false)
                 .default_width(560.0)
@@ -1577,7 +1743,7 @@ impl Composer {
             let mut open = true;
             let mut create = false;
             let mut cancel = false;
-            egui::Window::new("新建文件夹")
+            Theme::compact_window(ctx, "新建文件夹")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -1605,7 +1771,7 @@ impl Composer {
             let mut open = true;
             let mut confirm = false;
             let mut cancel = false;
-            egui::Window::new("删除已保存 API")
+            Theme::compact_window(ctx, "删除已保存 API")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -1706,26 +1872,34 @@ fn folders(document: &Value) -> Vec<String> {
     }
     values
 }
-fn modified(document: &Value, request: &Value) -> bool {
+fn changes_since_save(document: &Value, request: &Value) -> Option<bool> {
     let existing = text(request, "collectionEntryID");
     if let Some(saved) = rows(document, "collections")
         .iter()
         .find(|row| text(row, "id") == existing)
     {
-        return content_fields(request.clone()) != content_fields(saved["request"].clone());
+        return Some(content_fields(request.clone()) != content_fields(saved["request"].clone()));
     }
-    let kind = text(request, "kind");
-    if kind == "protobuf"
+    if text(request, "kind") == "protobuf"
         && !text(request, "specificationID").is_empty()
         && let Some(spec) = rows(document, "specifications")
             .iter()
             .find(|spec| text(spec, "id") == text(request, "specificationID"))
     {
-        return text(request, "name") != text(spec, "name")
-            || text(request, "body") != text(spec, "source");
+        return Some(
+            text(request, "name") != text(spec, "name")
+                || text(request, "body") != text(spec, "source"),
+        );
+    }
+    None
+}
+
+fn modified(document: &Value, request: &Value) -> bool {
+    if let Some(changed) = changes_since_save(document, request) {
+        return changed;
     }
     // Compare blank fields without allocating or hashing a potentially large body every frame.
-    let (default_name, default_body) = initial_fields(kind);
+    let (default_name, default_body) = initial_fields(text(request, "kind"));
     const TEXT_DEFAULTS: &[(&str, &str)] = &[
         ("method", "GET"),
         ("url", ""),
@@ -1797,38 +1971,46 @@ fn request_url(
         "输入请求 URL"
     };
     let id = ui.make_persistent_id("request_url");
-    let colors = Theme::current_palette(ui.ctx());
-    let mut frame = colors.input_frame().begin(ui);
-    let input = &mut frame.content_ui;
     // Single-line TextEdit replaces clipboard newlines, including shell continuations.
-    let imported = if allow_curl && !raw && input.memory(|memory| memory.has_focus(id)) {
-        input
-            .input_mut(|input| {
-                let at = input.events.iter().rposition(|event| {
-                    matches!(event, egui::Event::Paste(command) if matches!(
-                        command.split_whitespace().next(),
-                        Some("curl" | "curl.exe")
-                    ))
-                })?;
-                let egui::Event::Paste(command) = input.events.remove(at) else {
-                    unreachable!()
-                };
-                Some(command)
-            })
-            .map(|command| request_from_curl(&command).map(|value| apply_curl(request, value)))
+    let imported = if allow_curl && !raw && ui.memory(|memory| memory.has_focus(id)) {
+        ui.input_mut(|input| {
+            let at = input.events.iter().rposition(|event| {
+                matches!(event, egui::Event::Paste(command) if matches!(
+                    command.split_whitespace().next(),
+                    Some("curl" | "curl.exe")
+                ))
+            })?;
+            let egui::Event::Paste(command) = input.events.remove(at) else {
+                unreachable!()
+            };
+            Some(command)
+        })
+        .map(|command| request_from_curl(&command).map(|value| apply_curl(request, value)))
     } else {
         None
     };
-    let response =
-        input.add(input_text(object_text(request, "url"), label, (width - 2.0).max(1.0)).id(id));
-    input
-        .ctx()
-        .accesskit_node_builder(response.id, |node| node.set_label(label));
-    if response.has_focus() {
-        frame.frame.stroke.color = colors.accent;
-    }
-    frame.end(ui);
+    let response = request_input(ui, id, object_text(request, "url"), label, width);
     (response, imported)
+}
+
+fn request_input(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    value: &mut String,
+    label: &'static str,
+    width: f32,
+) -> egui::Response {
+    let colors = Theme::current_palette(ui.ctx());
+    let mut frame = colors.input_frame().begin(ui);
+    let response = frame
+        .content_ui
+        .add(input_text(value, label, (width - 2.0).max(1.0)).id(id));
+    response
+        .ctx
+        .accesskit_node_builder(id, |node| node.set_label(label));
+    frame.frame.stroke = colors.input_stroke(&response);
+    frame.end(ui);
+    response
 }
 fn apply_curl(request: &mut Value, mut imported: Value) {
     for key in [
@@ -2190,6 +2372,56 @@ fn show_reply(ui: &mut egui::Ui, reply: &mut Reply, tab: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collection_tabs_reopen_and_rename_without_overwriting_drafts() {
+        let mut saved = draft("http");
+        saved["url"] = json!("https://example.test/saved");
+        let mut composer = Composer {
+            document: Some(json!({"collections": [{"id": "saved", "request": saved}]})),
+            ..Default::default()
+        };
+        composer.open_collection_entry("saved");
+        let id = composer.active.clone();
+        composer.request_mut(&id).unwrap()["url"] = json!("https://example.test/edit");
+        composer.show_capture();
+        composer.open_collection_entry("saved");
+        assert_eq!(composer.active, id);
+        let document = composer.document.as_ref().unwrap();
+        assert_eq!(rows(document, "requests").len(), 1);
+
+        let duplicate = json!({"id": "duplicate", "collectionEntryID": "saved", "name": "旧草稿"});
+        composer.add(duplicate);
+        composer.open_collection_entry("saved");
+        assert_eq!(composer.active, "duplicate");
+        composer.apply_rename(&RenameTarget::Collection("saved".into()), "集合改名");
+        let tab = composer.request_mut(&id).unwrap();
+        assert_eq!(tab["name"], "集合改名");
+        assert_eq!(tab["url"], "https://example.test/edit");
+
+        composer.apply_rename(&RenameTarget::Tab(id.clone()), "标签改名");
+        let entry = &composer.document.as_ref().unwrap()["collections"][0]["request"];
+        assert_eq!(entry["name"], "标签改名");
+        assert_eq!(entry["url"], "https://example.test/saved");
+        assert_eq!(composer.request_mut(&id).unwrap()["name"], "标签改名");
+        assert_eq!(composer.request_mut("duplicate").unwrap()["name"], "旧草稿");
+    }
+
+    #[test]
+    fn new_and_edited_tabs_have_unsaved_changes() {
+        let mut request = draft("http");
+        let mut document = json!({"collections": []});
+        assert_eq!(changes_since_save(&document, &request), None);
+        assert!(!modified(&document, &request));
+
+        document["collections"] = json!([{"id": "saved", "request": request.clone()}]);
+        request["collectionEntryID"] = json!("saved");
+        assert_eq!(changes_since_save(&document, &request), Some(false));
+
+        request["url"] = json!("https://example.test/");
+        assert_eq!(changes_since_save(&document, &request), Some(true));
+        assert!(modified(&document, &request));
+    }
 
     #[test]
     fn pasting_capture_curl_imports_request_fields() {

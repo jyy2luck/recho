@@ -67,6 +67,7 @@ enum Pick {
 
 pub(super) struct CertificateUi {
     page: Option<Page>,
+    capture_setup: bool,
     return_local: bool,
     manual: bool,
     android_usb: bool,
@@ -84,6 +85,7 @@ impl Default for CertificateUi {
     fn default() -> Self {
         Self {
             page: None,
+            capture_setup: false,
             return_local: false,
             manual: false,
             android_usb: false,
@@ -101,9 +103,15 @@ impl Default for CertificateUi {
 
 impl CertificateUi {
     pub(super) fn open(&mut self, page: Page) {
+        self.capture_setup = false;
         self.manual = false;
         self.return_local = false;
         self.enter(page);
+    }
+
+    pub(super) fn open_capture_setup(&mut self) {
+        self.open(Page::Local);
+        self.capture_setup = true;
     }
 
     fn enter(&mut self, page: Page) {
@@ -210,10 +218,10 @@ impl CertificateUi {
         port: u16,
         running: bool,
         ready: bool,
-    ) {
-        let Some(page) = self.page else {
-            return;
-        };
+    ) -> Option<bool> {
+        let page = self.page?;
+        let capture_setup = self.capture_setup && page == Page::Local;
+        let trusted = self.backend.status == Some(true);
         let max_width = if page == Page::Android { 620.0 } else { 565.0 };
         let width = (ctx.content_rect().width() - 54.0).clamp(240.0, max_width);
         let height = (ctx.content_rect().height() - 172.0).clamp(
@@ -229,7 +237,11 @@ impl CertificateUi {
         let modal = Theme::modal(ctx, egui::Id::new("certificate_panel")).show(ctx, |ui| {
             ui.set_width(width);
             ui.horizontal(|ui| {
-                ui.heading(page.title());
+                ui.heading(if capture_setup {
+                    "首次 HTTPS 调试"
+                } else {
+                    page.title()
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if page == Page::Local {
                         if ui.selectable_label(self.manual, "手动").clicked() {
@@ -242,6 +254,9 @@ impl CertificateUi {
                     }
                 });
             });
+            if capture_setup {
+                ui.label("信任 Recho CA 后，调试时默认解密经过 Recho 的 HTTPS 流量。");
+            }
             ui.add_space(6.0);
             ui.separator();
             egui::ScrollArea::vertical()
@@ -275,13 +290,18 @@ impl CertificateUi {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if self.return_local {
                     "返回"
+                } else if capture_setup && !trusted {
+                    "暂不解密"
                 } else if page == Page::Detail {
                     "关闭"
                 } else {
                     "完成"
                 };
-                ui.add_enabled(self.picker.is_none(), egui::Button::new(label))
-                    .clicked()
+                ui.add_enabled(
+                    self.picker.is_none() && (!capture_setup || enabled),
+                    egui::Button::new(label),
+                )
+                .clicked()
             })
             .inner
         });
@@ -293,8 +313,12 @@ impl CertificateUi {
                 self.enter(Page::Local);
             } else {
                 self.page = None;
+                if std::mem::take(&mut self.capture_setup) {
+                    return Some(modal.inner && trusted);
+                }
             }
         }
+        None
     }
 
     fn local_auto(&mut self, ui: &mut egui::Ui, colors: Palette) {

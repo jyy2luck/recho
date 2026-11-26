@@ -1,6 +1,6 @@
 use super::*;
 use crate::certificate_ui::Page as CertificatePage;
-use crate::theme::Theme;
+use crate::theme::{CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header};
 use egui_extras::{Column, TableBuilder};
 
 const NEW_HTTP: egui::KeyboardShortcut =
@@ -463,14 +463,6 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                         proxy_preferences(app, ui);
                     }),
                     ("证书", |app, ui| {
-                        let mut intercept = app.intercept_tls;
-                        if ui.checkbox(&mut intercept, "HTTPS 解密").changed() {
-                            app.send(Command::Configure {
-                                running: app.running,
-                                intercept_tls: intercept,
-                            });
-                        }
-                        ui.separator();
                         for (page, label) in CertificatePage::MENU {
                             if ui
                                 .add_enabled(app.ready, egui::Button::new(label))
@@ -617,18 +609,23 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             .show(ui, |ui| sidebar(app, ui));
     }
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(colors.bg))
+        .frame(
+            egui::Frame::new()
+                .fill(colors.bg)
+                .inner_margin(egui::Margin::symmetric(14, 0)),
+        )
         .show(ui, |ui| {
             proxy_bar(app, ui);
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .show(ui, |ui| {
+                    control_row(ui);
                     ui.horizontal(|ui| {
                         capture_tabs(app, ui);
                         app.composer.show_tabs(ui, &app.worker);
                         let add = ui.add_enabled(
                             app.ready,
-                            egui::Button::new("＋").min_size(egui::vec2(30.0, 30.0)),
+                            egui::Button::new("＋").min_size(egui::Vec2::splat(CONTROL_HEIGHT)),
                         );
                         action_menu(
                             egui::Popup::menu(&add)
@@ -691,20 +688,6 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                     app.library.close();
                     app.composer.open_library_capture(captured);
                 }
-                return;
-            }
-            if app.navigation == Navigation::Tools && app.network_open {
-                if ui.small_button("返回抓包").clicked() {
-                    app.network_open = false;
-                }
-                app.network.show(ui, &app.worker);
-                return;
-            }
-            if app.navigation == Navigation::Tools && app.rules_open {
-                if ui.small_button("返回抓包").clicked() {
-                    app.rules_open = false;
-                }
-                app.rules.show(ui, &app.worker);
                 return;
             }
             if app.composer.active() {
@@ -773,8 +756,6 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                     ] {
                         if sidebar_row(ui, label, None).clicked() {
                             app.rules.open(category);
-                            app.rules_open = true;
-                            app.network_open = false;
                         }
                     }
                 });
@@ -872,7 +853,7 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
 fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
     let colors = app.theme.palette(ui.ctx());
     egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(14, 8))
+        .inner_margin(egui::Margin::symmetric(0, 8))
         .show(ui, |ui| {
             let size = egui::vec2(ui.available_width(), 34.0);
             let layout = egui::Layout::left_to_right(egui::Align::Center);
@@ -1193,7 +1174,8 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
                     ui.visuals().text_color()
                 }),
             )
-            .min_size(egui::vec2(100.0, 30.0)),
+            .min_size(egui::vec2(100.0, CONTROL_HEIGHT))
+            .wrap_mode(egui::TextWrapMode::Extend),
         );
         action_menu(
             egui::Popup::context_menu(&response)
@@ -1218,7 +1200,7 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
         if id != "default" {
             let close = ui.add(
                 egui::Button::new("×")
-                    .min_size(egui::vec2(26.0, 30.0))
+                    .min_size(egui::vec2(26.0, CONTROL_HEIGHT))
                     .frame_when_inactive(false),
             );
             close.ctx.accesskit_node_builder(close.id, |node| {
@@ -1295,48 +1277,56 @@ fn history_sidebar(app: &mut Recho, ui: &mut egui::Ui) {
             }
             for day in &app.history_days {
                 ui.push_id(&day.date, |ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let delete = ui.add_enabled(
-                            delete_enabled,
-                            egui::Button::new(icon("\u{e92e}").size(16.0))
-                                .frame_when_inactive(false),
-                        );
-                        delete.widget_info(|| {
-                            egui::WidgetInfo::labeled(
-                                egui::WidgetType::Button,
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let delete = ui.add_enabled(
                                 delete_enabled,
-                                format!("删除 {}", day.date),
-                            )
-                        });
-                        if delete.on_hover_text("删除这一天").clicked() {
-                            delete_day = Some(day.date.clone());
-                        }
-                        let selected = app.history_selected_dates.contains(&day.date);
-                        if sidebar_row(ui, format!("{}  ({})", day.date, day.total), Some(selected))
-                            .clicked()
-                        {
-                            ui.memory_mut(|memory| memory.request_focus(focus_id));
-                            let modifiers = ui.input(|input| input.modifiers);
-                            let order = if modifiers.shift {
-                                app.history_days
-                                    .iter()
-                                    .map(|day| day.date.as_str())
-                                    .collect()
-                            } else {
-                                Vec::new()
-                            };
-                            select_list_item(
-                                &mut app.history_selected_dates,
-                                &mut app.history_date_anchor,
-                                &day.date,
-                                modifiers,
-                                &order,
+                                egui::Button::new(icon("\u{e92e}").size(16.0))
+                                    .frame_when_inactive(false),
                             );
-                            if !modifiers.command && !modifiers.ctrl && !modifiers.shift {
-                                date = Some(day.date.clone());
+                            delete.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    delete_enabled,
+                                    format!("删除 {}", day.date),
+                                )
+                            });
+                            if delete.on_hover_text("删除这一天").clicked() {
+                                delete_day = Some(day.date.clone());
                             }
-                        }
-                    });
+                            let selected = app.history_selected_dates.contains(&day.date);
+                            if sidebar_row(
+                                ui,
+                                format!("{}  ({})", day.date, day.total),
+                                Some(selected),
+                            )
+                            .clicked()
+                            {
+                                ui.memory_mut(|memory| memory.request_focus(focus_id));
+                                let modifiers = ui.input(|input| input.modifiers);
+                                let order = if modifiers.shift {
+                                    app.history_days
+                                        .iter()
+                                        .map(|day| day.date.as_str())
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                };
+                                select_list_item(
+                                    &mut app.history_selected_dates,
+                                    &mut app.history_date_anchor,
+                                    &day.date,
+                                    modifiers,
+                                    &order,
+                                );
+                                if !modifiers.command && !modifiers.ctrl && !modifiers.shift {
+                                    date = Some(day.date.clone());
+                                }
+                            }
+                        },
+                    );
                 });
             }
         });
@@ -1794,9 +1784,6 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         app.library.add(&app.worker, &rows, compare, now);
     }
     if let Some((category, method, url)) = rule {
-        app.navigate(Navigation::Tools);
-        app.rules_open = true;
-        app.network_open = false;
         app.rules.new_for_capture(category, &method, &url);
     }
 }
@@ -1865,7 +1852,7 @@ mod selection_tests {
             (egui::Modifiers::SHIFT, false),
         ] {
             let ctx = egui::Context::default();
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     events: vec![egui::Event::ModifiersChanged(modifiers), egui::Event::Cut],
                     ..Default::default()
@@ -1873,7 +1860,9 @@ mod selection_tests {
                 |ui| {
                     assert_eq!(ui.input_mut(clear_capture_pressed), expected);
                 },
-            );
+            )
+            .textures_delta
+            .clear();
         }
     }
 
@@ -2236,56 +2225,24 @@ fn response_badge(
 }
 
 fn dialogs(app: &mut Recho, ctx: &egui::Context) {
+    app.network.show(ctx, &app.worker);
     crate::capture_filter_ui::highlight_dialog(app, ctx);
     if app.connection_open {
-        let mut open = true;
-        egui::Window::new("连接设置")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(480.0)
-            .show(ctx, |ui| {
-                let address_ready = app.ready && app.port != 0;
-                ui.horizontal(|ui| {
-                    ui.label(if address_ready {
-                        format!("代理地址  {}", app.proxy_address())
-                    } else {
-                        "正在启动引擎…".into()
-                    });
-                    if ui
-                        .add_enabled(address_ready, egui::Button::new("修改端口号"))
-                        .clicked()
-                    {
-                        app.port_dialog = Some(network_ui::PortDialog::new(app.port));
-                    }
-                });
-                let mut intercept = app.intercept_tls;
-                if ui.checkbox(&mut intercept, "HTTPS 解密").changed() {
-                    app.send(Command::Configure {
-                        running: app.running,
-                        intercept_tls: intercept,
-                    });
-                }
-                ui.separator();
-                let (active, pending) = app.system_proxy;
-                let label = if active || pending {
-                    "恢复系统代理"
+        let modal = Theme::modal(ctx, egui::Id::new("connection_settings")).show(ctx, |ui| {
+            ui.set_width(480.0);
+            let close = dialog_header(ui, "连接设置", true);
+            let address_ready = app.ready && app.port != 0;
+            ui.horizontal(|ui| {
+                ui.label(if address_ready {
+                    format!("代理地址  {}", app.proxy_address())
                 } else {
-                    "启用系统代理"
-                };
+                    "正在启动引擎…".into()
+                });
                 if ui
-                    .add_enabled(
-                        app.ready && (app.running || pending),
-                        egui::Button::new(label),
-                    )
+                    .add_enabled(address_ready, egui::Button::new("修改端口号"))
                     .clicked()
                 {
-                    app.send(Command::SystemProxy(!pending && !active));
-                }
-                proxy_preferences(app, ui);
-                ui.label("客户端可使用上方代理地址。解密 HTTPS 时需信任本地 CA。");
-                if ui.button("安装 CA 证书").clicked() {
-                    app.certificates.open(CertificatePage::Local);
+                    app.port_dialog = Some(network_ui::PortDialog::new(app.port));
                 }
                 if ui
                     .add_enabled(address_ready, egui::Button::new("复制代理地址"))
@@ -2294,26 +2251,64 @@ fn dialogs(app: &mut Recho, ctx: &egui::Context) {
                     ctx.copy_text(app.proxy_address());
                 }
             });
-        app.connection_open = open;
+            ui.separator();
+            let (active, pending) = app.system_proxy;
+            let label = if active || pending {
+                "恢复系统代理"
+            } else {
+                "启用系统代理"
+            };
+            if ui
+                .add_enabled(
+                    app.ready && (app.running || pending),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                app.send(Command::SystemProxy(!pending && !active));
+            }
+            proxy_preferences(app, ui);
+            ui.label("客户端可使用上方代理地址。解密 HTTPS 时需信任本地 CA。");
+            if ui.button("安装 CA 证书").clicked() {
+                app.certificates.open(CertificatePage::Local);
+            }
+            close
+        });
+        if app.port_dialog.is_none()
+            && !app.confirm_proxy_auto
+            && (modal.inner || modal.should_close())
+        {
+            app.connection_open = false;
+        }
     }
     if let Some(dialog) = &mut app.port_dialog
         && dialog.show(ctx, &app.worker, app.theme.palette(ctx), app.port)
     {
         app.port_dialog = None;
     }
-    app.certificates.show(
+    if let Some(intercept_tls) = app.certificates.show(
         ctx,
         app.theme.palette(ctx),
         app.port,
         app.running,
         app.ready,
-    );
+    ) {
+        app.send(Command::Configure {
+            running: None,
+            intercept_tls: Some(intercept_tls),
+        });
+    }
     if app.confirm_proxy_auto {
         let modal = Theme::modal(ctx, egui::Id::new("proxy_auto_confirmation")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.heading("随调试启动启用系统代理");
+            let close = dialog_header(ui, "随调试启动启用系统代理", true);
             ui.label("下次启动 recho 或恢复调试时，recho 会将选中的协议指向本机监听端口。暂停、退出或手动恢复时会恢复原设置。");
-            ui.horizontal(|ui| (ui.button("启用").clicked(), ui.button("取消").clicked())).inner
+            let colors = app.theme.palette(ctx);
+            dialog_footer(ui, |ui| {
+                let enable = ui.add(colors.dialog_action("启用", colors.accent)).clicked();
+                let cancel = ui.button("取消").clicked();
+                (enable, close || cancel)
+            })
         });
         if modal.inner.0 {
             app.set_proxy_preferences(platform::ProxyPreferences {

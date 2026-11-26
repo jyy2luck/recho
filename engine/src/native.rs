@@ -120,6 +120,7 @@ pub struct Snapshot {
     pub running: bool,
     pub port: u16,
     pub intercept_tls: bool,
+    pub intercept_tls_configured: bool,
     pub history_error: Option<String>,
     pub group: String,
     pub incognito: bool,
@@ -226,6 +227,7 @@ impl DesktopEngine {
             running: proxy.running,
             port: proxy.port,
             intercept_tls: proxy.intercept,
+            intercept_tls_configured: settings.intercept_tls_configured || proxy.intercept,
             history_error: history.error.clone(),
             group: settings.capture_group,
             incognito: settings.incognito,
@@ -260,12 +262,19 @@ impl DesktopEngine {
 
     pub async fn configure(
         &self,
-        running: bool,
-        intercept_tls: bool,
+        running: impl Into<Option<bool>>,
+        intercept_tls: impl Into<Option<bool>>,
     ) -> std::result::Result<(), String> {
+        let mut input = json!({});
+        if let Some(running) = running.into() {
+            input["running"] = json!(running);
+        }
+        if let Some(intercept_tls) = intercept_tls.into() {
+            input["interceptTLS"] = json!(intercept_tls);
+        }
         self.running
             .engine
-            .configure_proxy(&json!({"running": running, "interceptTLS": intercept_tls}))
+            .configure_proxy(&input)
             .await
             .map_err(|e| e.to_string())
     }
@@ -477,10 +486,15 @@ mod tests {
         assert!(detail.notice.is_none());
         assert_eq!(detail.bytes, expected.as_bytes());
         assert!(engine.detail("../../missing", Phase::Response).is_err());
-        engine.configure(false, false).await.unwrap();
+        engine.configure(false, None).await.unwrap();
         assert!(!engine.snapshot(Some(snapshot.revision)).await.running);
-        engine.configure(true, false).await.unwrap();
-        assert!(engine.snapshot(Some(snapshot.revision)).await.running);
+        engine.configure(true, None).await.unwrap();
+        let resumed = engine.status().await;
+        assert!(resumed.running && !resumed.intercept_tls_configured);
+        engine.configure(None, false).await.unwrap();
+        let passthrough = engine.status().await;
+        assert!(passthrough.running && passthrough.intercept_tls_configured);
+        assert!(!passthrough.intercept_tls);
         let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         assert!(
             engine
@@ -496,6 +510,7 @@ mod tests {
         assert_eq!(engine.snapshot(None).await.port, suggested);
         let settings = crate::settings::SettingsStore::open(directory.path());
         assert_eq!(settings.snapshot().proxy_port, Some(suggested));
+        assert!(settings.snapshot().intercept_tls_configured);
         engine.clear().unwrap();
         assert!(
             engine

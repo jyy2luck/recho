@@ -47,7 +47,6 @@ enum Action {
     ProxyProtocol(ProxyProtocol),
     ProxyAuto,
     Connection,
-    Intercept,
     Certificates(CertificatePage),
     ExportCertificate(CertificateFormat),
     About,
@@ -239,8 +238,6 @@ fn install(mtm: MainThreadMarker, ctx: &egui::Context) -> Retained<RechoMenuTarg
         Action::Network(NetworkSection::Upstream),
     );
     let certificates = top(mtm, &menu, "证书");
-    add(&certificates, "HTTPS 解密", "", Action::Intercept);
-    certificates.addItem(&NSMenuItem::separatorItem(mtm));
     for (page, label) in CertificatePage::MENU {
         add(&certificates, label, "", Action::Certificates(page));
     }
@@ -275,7 +272,6 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             | Action::ImportHar
             | Action::ToggleCapture
             | Action::Clear
-            | Action::Intercept
             | Action::Certificates(_)
             | Action::ExportCertificate(_) => app.ready,
             Action::Save => app.composer.active(),
@@ -305,7 +301,6 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             Action::SystemProxy => app.system_proxy.0,
             Action::ProxyProtocol(protocol) => protocol.enabled(app.proxy_preferences),
             Action::ProxyAuto => app.proxy_preferences.auto,
-            Action::Intercept => app.intercept_tls,
             Action::Sidebar => app.sidebar_visible,
             Action::Details => app.details_open,
             Action::ThemeColor(color) => app.theme.color == *color,
@@ -397,12 +392,7 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::ToggleCapture => app.toggle_capture(),
         Action::Clear => app.clear_capture_space(),
         Action::Incognito => app.set_incognito(!app.spaces.incognito),
-        Action::Rules(category) => {
-            app.navigate(Navigation::Tools);
-            app.rules.open(category);
-            app.rules_open = true;
-            app.network_open = false;
-        }
+        Action::Rules(category) => app.rules.open(category),
         Action::Network(section) => app.open_network(section),
         Action::Highlights => app.edit_highlights(),
         Action::SystemProxy => app.send(Command::SystemProxy(
@@ -415,10 +405,6 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::Connection => app.connection_open = true,
         Action::Certificates(page) => app.certificates.open(page),
         Action::ExportCertificate(format) => app.certificates.export(ctx, format),
-        Action::Intercept => app.send(Command::Configure {
-            running: app.running,
-            intercept_tls: !app.intercept_tls,
-        }),
         Action::About => NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanel(None),
         Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
     }

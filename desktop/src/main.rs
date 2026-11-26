@@ -179,10 +179,8 @@ struct Recho {
     theme_path: PathBuf,
     composer: composer::Composer,
     rules: rules_ui::RulesUi,
-    rules_open: bool,
     library: library_ui::LibraryUi,
     network: network_ui::NetworkUi,
-    network_open: bool,
     mcp: mcp_ui::McpUi,
     workspace_ops: Vec<Value>,
     active_workspace_op: Option<(String, Result<Value, String>, Option<RequestHandle>)>,
@@ -217,7 +215,6 @@ struct Recho {
     ready: bool,
     ca_path: PathBuf,
     running: bool,
-    intercept_tls: bool,
     proxy_host: Ipv4Addr,
     port: u16,
     port_dialog: Option<network_ui::PortDialog>,
@@ -296,13 +293,11 @@ impl Recho {
             response_save: None,
             notice: None,
             network: network_ui::NetworkUi::default(),
-            network_open: false,
             mcp: mcp_ui::McpUi::default(),
             workspace_ops: Vec::new(),
             active_workspace_op: None,
             composer: composer::Composer::default(),
             rules: rules_ui::RulesUi::default(),
-            rules_open: false,
             library: library_ui::LibraryUi::default(),
             certificates: certificate_ui::CertificateUi::default(),
             system_proxy: (false, false),
@@ -328,7 +323,6 @@ impl Recho {
             ready: false,
             ca_path: PathBuf::new(),
             running: false,
-            intercept_tls: false,
             proxy_host: Ipv4Addr::LOCALHOST,
             port: 0,
             port_dialog: None,
@@ -403,8 +397,8 @@ impl Recho {
     }
     fn toggle_capture(&mut self) {
         self.send(Command::Configure {
-            running: !self.running,
-            intercept_tls: self.intercept_tls,
+            running: Some(!self.running),
+            intercept_tls: None,
         });
     }
     fn select(&mut self, id: Option<String>) {
@@ -492,9 +486,6 @@ impl Recho {
         }
     }
     fn open_network(&mut self, section: network_ui::NetworkSection) {
-        self.navigate(Navigation::Tools);
-        self.rules_open = false;
-        self.network_open = true;
         self.network.open(section);
     }
     fn load_history(&mut self, offset: usize) {
@@ -777,8 +768,10 @@ impl Recho {
             self.proxy_host = host;
         }
         if let Some(snapshot) = inbox.snapshot {
+            if snapshot.running && !self.running && !snapshot.intercept_tls_configured {
+                self.certificates.open_capture_setup();
+            }
             self.running = snapshot.running;
-            self.intercept_tls = snapshot.intercept_tls;
             self.port = snapshot.port;
             self.history_error = snapshot.history_error;
             self.spaces.incognito = snapshot.incognito;
@@ -1035,7 +1028,7 @@ impl eframe::App for Recho {
         if self.closing {
             let message = self.composer.save_error().map(str::to_owned);
             if let Some(message) = message {
-                egui::Window::new("工作区保存失败")
+                theme::Theme::compact_window(ui.ctx(), "工作区保存失败")
                     .collapsible(false)
                     .show(ui.ctx(), |ui| {
                         ui.label(message);

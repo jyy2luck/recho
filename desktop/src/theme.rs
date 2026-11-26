@@ -62,13 +62,108 @@ pub(super) struct Palette {
 }
 
 pub(super) const CONTROL_HEIGHT: f32 = 32.0;
+const CONTROL_RADIUS: u8 = 5;
+
+pub(super) fn control_row(ui: &mut egui::Ui) {
+    ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+    let widgets = &mut ui.visuals_mut().widgets;
+    for style in [
+        &mut widgets.inactive,
+        &mut widgets.hovered,
+        &mut widgets.active,
+        &mut widgets.open,
+    ] {
+        style.corner_radius = egui::CornerRadius::same(CONTROL_RADIUS);
+        style.expansion = 0.0;
+    }
+}
+
+pub(super) fn dialog_header(
+    ui: &mut egui::Ui,
+    title: impl Into<egui::RichText>,
+    enabled: bool,
+) -> bool {
+    control_row(ui);
+    let close = ui
+        .horizontal(|ui| {
+            ui.heading(title);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let button = ui.add_enabled(
+                    enabled,
+                    egui::Button::new(egui::RichText::new("×").size(19.0))
+                        .frame_when_inactive(false)
+                        .min_size(egui::vec2(CONTROL_HEIGHT, CONTROL_HEIGHT)),
+                );
+                button.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "关闭")
+                });
+                button.on_hover_text("关闭").clicked()
+            })
+            .inner
+        })
+        .inner;
+    ui.separator();
+    ui.add_space(6.0);
+    close
+}
+
+pub(super) fn dialog_footer<R>(ui: &mut egui::Ui, actions: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.add_space(6.0);
+    ui.separator();
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), CONTROL_HEIGHT),
+        egui::Layout::right_to_left(egui::Align::Center),
+        actions,
+    )
+    .inner
+}
+
+pub(super) fn dialog_columns<R>(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    sidebar: impl FnOnce(&mut egui::Ui) -> R,
+    content: impl FnOnce(&mut egui::Ui, R),
+) {
+    let colors = Theme::current_palette(ui.ctx());
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.take_available_space();
+        let selection = egui::Panel::left(ui.make_persistent_id("dialog_sidebar"))
+            .exact_size(132.0)
+            .frame(egui::Frame::new().fill(colors.side).inner_margin(8))
+            .show(ui, sidebar)
+            .inner;
+        egui::Frame::new()
+            .inner_margin(egui::Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.take_available_space();
+                content(ui, selection);
+            });
+    });
+}
 
 impl Palette {
+    pub(super) fn dialog_action(self, label: &str, fill: Color32) -> egui::Button<'_> {
+        egui::Button::new(egui::RichText::new(label).color(self.bg))
+            .fill(fill)
+            .min_size(egui::vec2(66.0, CONTROL_HEIGHT))
+    }
+
     pub(super) fn input_frame(self) -> egui::Frame {
         egui::Frame::new()
             .fill(self.bg)
             .stroke(egui::Stroke::new(1.0, self.line))
-            .corner_radius(5)
+            .corner_radius(CONTROL_RADIUS)
+    }
+
+    pub(super) fn input_stroke(self, response: &egui::Response) -> egui::Stroke {
+        egui::Stroke::new(
+            1.0,
+            if response.hovered() || response.has_focus() {
+                self.accent
+            } else {
+                self.line
+            },
+        )
     }
 }
 
@@ -299,6 +394,15 @@ impl Theme {
 
     pub(super) fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
         egui::Modal::new(id).frame(egui::Frame::window(&ctx.global_style()))
+    }
+
+    pub(super) fn compact_window<'a>(
+        ctx: &egui::Context,
+        title: impl egui::IntoAtoms<'a>,
+    ) -> egui::Window<'a> {
+        egui::Window::new(title).title_frame(
+            egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::symmetric(12, 6)),
+        )
     }
 
     pub(super) fn apply(self, ctx: &egui::Context) {

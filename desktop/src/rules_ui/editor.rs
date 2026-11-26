@@ -1,6 +1,6 @@
 use super::breakpoint::{header_lines, text_area};
 use super::{RequestHandle, RuleCategory, Value, Worker, egui, finished, json, label};
-use crate::theme::Theme;
+use crate::theme::{Theme, dialog_footer, dialog_header};
 use recho_core::native::parse_header_lines;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -225,13 +225,15 @@ impl RuleEditor {
         let mut switch_mode = false;
         let mut save = false;
         let mut cancel = false;
+        let colors = Theme::current_palette(ctx);
         let reply = Theme::modal(ctx, egui::Id::new("rule_editor")).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 52.0).min(800.0));
-            ui.heading(if self.baseline.is_some() {
+            let title = if self.baseline.is_some() {
                 "编辑规则"
             } else {
                 "新建规则"
-            });
+            };
+            let dismiss = dialog_header(ui, title, !state.saving);
             egui::ScrollArea::vertical()
                 .max_height((ctx.content_rect().height() - 190.0).max(220.0))
                 .show(ui, |ui| {
@@ -243,24 +245,36 @@ impl RuleEditor {
                         }
                     });
                 });
-            ui.separator();
             if let Some(error) = self.error.as_deref().or(state.source_error) {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
             if self.cancel {
                 ui.label("放弃未保存的修改？");
-                ui.horizontal(|ui| {
+                dialog_footer(ui, |ui| {
+                    if ui
+                        .add(colors.dialog_action("放弃修改", colors.red))
+                        .clicked()
+                    {
+                        *close = true;
+                    }
                     if ui.button("继续编辑").clicked() {
                         self.cancel = false;
                     }
-                    if ui.button("放弃修改").clicked() {
-                        *close = true;
-                    }
                 });
-                return;
+                return dismiss;
             }
-            ui.horizontal_wrapped(|ui| {
+            dialog_footer(ui, |ui| {
+                let label = if state.saving {
+                    "正在保存…"
+                } else {
+                    "保存规则"
+                };
+                save = ui
+                    .add_enabled(state.can_save, colors.dialog_action(label, colors.accent))
+                    .clicked();
                 ui.add_enabled_ui(!state.saving, |ui| {
+                    cancel = ui.button("取消").clicked();
+                    *refresh = ui.button("刷新规则列表").clicked();
                     switch_mode = ui
                         .button(if self.advanced.is_some() {
                             "返回表单"
@@ -268,25 +282,14 @@ impl RuleEditor {
                             "高级 JSON"
                         })
                         .clicked();
-                    *refresh = ui.button("刷新规则列表").clicked();
-                    cancel = ui.button("取消").clicked();
                 });
-                save = ui
-                    .add_enabled(
-                        state.can_save,
-                        egui::Button::new(if state.saving {
-                            "正在保存…"
-                        } else {
-                            "保存规则"
-                        }),
-                    )
-                    .clicked();
                 if state.can_save && state.keyboard {
                     save |= ui.input_mut(|input| {
                         input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
                     });
                 }
             });
+            dismiss
         });
         if switch_mode {
             if self.advanced.is_some() {
@@ -313,7 +316,7 @@ impl RuleEditor {
                 Err(error) => self.error = Some(error),
             }
         }
-        if !state.saving && (cancel || reply.should_close()) {
+        if !state.saving && (cancel || reply.inner || reply.should_close()) {
             if self.dirty {
                 self.cancel = true;
             } else {

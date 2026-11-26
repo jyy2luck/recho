@@ -599,6 +599,7 @@ impl Engine {
                 }
                 if input.get("interceptTLS").is_some() {
                     patch["interceptTLS"] = json!(intercept);
+                    patch["interceptTLSConfigured"] = json!(true);
                 }
                 let next = self.settings.updated(patch)?;
                 self.settings.save(next)?;
@@ -1450,7 +1451,8 @@ impl Engine {
                     if next.proxy_port != self.settings.snapshot().proxy_port {
                         return Err(Error::bad("Change the listening port using POST /proxy"));
                     }
-                    if next.intercept_tls != self.settings.snapshot().intercept_tls {
+                    if next.intercept_tls != self.settings.snapshot().intercept_tls
+                        || next.intercept_tls_configured != self.settings.snapshot().intercept_tls_configured {
                         return Err(Error::bad("Change HTTPS interception using POST /proxy"));
                     }
                     let prepared = self.prepare_reverse(&next).await?;
@@ -3053,7 +3055,7 @@ impl Engine {
         let tls_enabled = self.proxy.lock().await.intercept;
         let intercept = tls_enabled && settings.intercept(host, port) && !policy.bypass;
         let tunnel_notice = if !tls_enabled {
-            "[Encrypted tunnel; HTTPS decryption is disabled. Select HTTPS in the system proxy protocols and trust the local CA on the device. CONNECT 200 only confirms tunnel establishment.]"
+            "[Encrypted tunnel; HTTPS decryption is disabled. Enable SSL proxying in Debug > SSL Configuration and trust the Recho CA on this device. CONNECT 200 only confirms tunnel establishment.]"
         } else if policy.bypass {
             "[Encrypted tunnel; bypassed by gateway policy. CONNECT 200 only confirms tunnel establishment.]"
         } else {

@@ -31,8 +31,8 @@ pub enum PortChange {
 pub enum Command {
     Port(PortChange, oneshot::Sender<Result<u16, String>>),
     Configure {
-        running: bool,
-        intercept_tls: bool,
+        running: Option<bool>,
+        intercept_tls: Option<bool>,
     },
     Detail {
         generation: u64,
@@ -187,7 +187,7 @@ impl Worker {
                             let Some(command) = command else { break };
                             let result = match command {
                                 Command::Configure { running, intercept_tls } => {
-                                    if !running && system_proxy.pending() {
+                                    if running == Some(false) && system_proxy.pending() {
                                         match system_proxy.restore(&engine).await {
                                             Ok(()) => engine.configure(running, intercept_tls).await,
                                             Err(error) => Err(error),
@@ -195,7 +195,7 @@ impl Worker {
                                     } else {
                                         let was_running = engine.status().await.running;
                                         match engine.configure(running, intercept_tls).await {
-                                            Ok(()) if running && !was_running && system_proxy.preferences().auto => {
+                                            Ok(()) if running == Some(true) && !was_running && system_proxy.preferences().auto => {
                                                 let port = engine.status().await.port;
                                                 system_proxy.enable_automatically(&engine, port).await
                                             }
@@ -354,7 +354,7 @@ impl Worker {
                         proxy_state = next_proxy_state;
                         publish(&mut |inbox| inbox.system_proxy = Some(proxy_state));
                     }
-                    let next_status = (snapshot.running, snapshot.port, snapshot.intercept_tls, snapshot.history_error.clone(), snapshot.group.clone(), snapshot.incognito, snapshot.enabled_list_filters.clone());
+                    let next_status = (snapshot.running, snapshot.port, snapshot.intercept_tls_configured, snapshot.history_error.clone(), snapshot.group.clone(), snapshot.incognito, snapshot.enabled_list_filters.clone());
                     let changed = status.as_ref() != Some(&next_status);
                     status = Some(next_status);
                     let captures = engine.capture_batch(&snapshot.group, capture_group != snapshot.group);

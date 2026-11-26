@@ -108,6 +108,9 @@ try:
     report["proxy_port"] = port
     wait_for(lambda: bool(json.loads(ui("windows"))))
     ui("activate")
+    wait_for(lambda: "暂不解密" in tree())
+    ui("click-text", "暂不解密")
+    wait_for(lambda: api("/settings")["interceptTLSConfigured"])
     wait_for(lambda: "添加条件" in tree())
     phase = "empty"
     time.sleep(5)

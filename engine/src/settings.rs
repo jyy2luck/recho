@@ -150,6 +150,8 @@ pub struct Settings {
     pub proxy_port: Option<u16>,
     #[serde(rename = "interceptTLS")]
     pub intercept_tls: bool,
+    #[serde(rename = "interceptTLSConfigured")]
+    pub intercept_tls_configured: bool,
     pub rule_folders: BTreeMap<String, Vec<String>>,
     pub rewrite_enabled: bool,
     pub script_enabled: bool,
@@ -181,6 +183,7 @@ impl Default for Settings {
             mcp_remote_enabled: false,
             proxy_port: None,
             intercept_tls: false,
+            intercept_tls_configured: false,
             rule_folders: BTreeMap::new(),
             rewrite_enabled: true,
             script_enabled: true,
