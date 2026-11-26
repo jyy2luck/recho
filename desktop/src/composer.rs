@@ -1453,9 +1453,11 @@ impl Composer {
                 request["specificationID"] = definition["id"].clone();
                 self.add(request);
             }
+            ui.close();
         }
         if sidebar_row(ui, "新建 Protobuf", None).clicked() {
             self.open_protobuf();
+            ui.close();
         }
     }
     fn save_specification(&mut self, tab: &str, name: String, source: String) {

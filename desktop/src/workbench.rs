@@ -65,12 +65,11 @@ fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
         .show(ui, body);
 }
 
-pub(super) fn sidebar_row(
+pub(super) fn sidebar_row<'a>(
     ui: &mut egui::Ui,
-    title: impl Into<egui::WidgetText>,
+    title: impl egui::IntoAtoms<'a>,
     selected: Option<bool>,
 ) -> egui::Response {
-    let title = title.into();
     let button = match selected {
         Some(selected) => egui::Button::selectable(selected, title),
         None => egui::Button::new(title).frame_when_inactive(false),
@@ -711,13 +710,10 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                                     app.composer.open_grpc();
                                     ui.close();
                                 }
-                                ui.menu_button("新建规范文件", |ui| {
+                                ui.menu_button("Protobuf 规范", |ui| {
                                     ui.set_width(120.0);
                                     ui.spacing_mut().interact_size.y = 26.0;
-                                    if menu_item(ui, "Protobuf", true) {
-                                        app.composer.open_protobuf();
-                                        ui.close();
-                                    }
+                                    app.composer.show_specifications(ui);
                                 });
                                 ui.separator();
                                 if menu_item(ui, "新建临时捕获", true) {
@@ -756,15 +752,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             }
             filters(app, ui);
             crate::capture_filter_ui::show(app, ui);
-            if app.details_open && app.selected.is_some() {
-                let size = (ui.available_width() * 0.50).max(360.0);
-                egui::Panel::right("details")
-                    .default_size(size)
-                    .min_size(330.0)
-                    .resizable(true)
-                    .show(ui, |ui| details(app, ui));
-            }
-            capture_table(app, ui);
+            capture_panes(app, ui);
         });
     dialogs(app, ui.ctx());
     app.composer.show_dialogs(ui.ctx(), &app.worker);
@@ -839,40 +827,50 @@ fn sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                     }
                 });
             } else {
-                section(ui, "规范文件", |ui| {
-                    app.composer.show_specifications(ui);
-                });
                 app.library.show_sidebar(ui, &app.worker);
                 section(ui, "设备", |ui| {
                     if sidebar_row(ui, "安装 CA 证书", None).clicked() {
                         app.certificates.open(CertificatePage::Local);
                     }
                 });
-                let apps: BTreeSet<_> =
-                    app.rows.iter().map(|row| row.application.clone()).collect();
+                let mut apps = BTreeMap::<_, BTreeSet<_>>::new();
+                for row in &app.rows {
+                    let paths = apps.entry(row.application.as_str()).or_default();
+                    if let Some(path) = row.application_path.as_deref().filter(|p| !p.is_empty()) {
+                        paths.insert(path);
+                    }
+                }
+                let mut app_filter = None;
                 section(ui, "应用程序", |ui| {
                     if apps.is_empty() {
                         ui.weak("暂无应用程序");
                     }
                     if !app.app_filter.is_empty() && sidebar_row(ui, "全部应用", None).clicked()
                     {
-                        app.app_filter.clear();
-                        app.refilter();
+                        app_filter = Some("");
                     }
-                    for name in apps {
-                        if sidebar_row(ui, &name, Some(app.app_filter == name))
-                            .on_hover_text(&name)
+                    for (name, paths) in apps {
+                        let mut title = egui::Atoms::new(name);
+                        if let Some(texture) = paths.into_iter().find_map(|path| {
+                            app.application_icons
+                                .get(ui.ctx(), Some(path))
+                                .map(|icon| icon.id())
+                        }) {
+                            title.push_left(egui::Image::new((texture, egui::Vec2::splat(14.0))));
+                        }
+                        let selected = app.app_filter == name;
+                        if sidebar_row(ui, title, Some(selected))
+                            .on_hover_text(name)
                             .clicked()
                         {
-                            app.app_filter = if app.app_filter == name {
-                                String::new()
-                            } else {
-                                name
-                            };
-                            app.refilter();
+                            app_filter = Some(if selected { "" } else { name });
                         }
                     }
                 });
+                if let Some(filter) = app_filter {
+                    app.app_filter = filter.to_owned();
+                    app.refilter();
+                }
                 let hosts: BTreeSet<_> = app
                     .rows
                     .iter()
@@ -1462,14 +1460,26 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
         return;
     }
     ui.separator();
+    capture_panes(app, ui);
+}
+
+fn capture_panes(app: &mut Recho, ui: &mut egui::Ui) {
     if app.details_open && app.selected.is_some() {
-        egui::Panel::right("history_detail")
+        let panel_id = if app.navigation == Navigation::History {
+            "history_detail"
+        } else {
+            "details"
+        };
+        egui::Panel::right(panel_id)
             .default_size((ui.available_width() * 0.5).max(360.0))
             .min_size(330.0)
             .resizable(true)
-            .show(ui, |ui| details(app, ui));
+            .show(ui, |ui| {
+                ui.take_available_width();
+                details(app, ui);
+            });
     }
-    capture_table(app, ui);
+    egui::CentralPanel::no_frame().show(ui, |ui| capture_table(app, ui));
 }
 
 fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
@@ -1552,6 +1562,9 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                 app.copy_curl(id);
             }
         }
+    }
+    if ui.available_width() <= 0.0 {
+        return;
     }
     let mut choose = None;
     let mut open = false;
@@ -1860,7 +1873,7 @@ fn capture_table_builder(
     let default_table_width = widths.iter().sum::<f32>()
         + spacing.item_spacing.x * (widths.len() - 1) as f32
         + spacing.scroll.allocated_width();
-    // Size the URL against the default widths so it cannot counteract a drag farther right.
+    // Give the URL the extra space at first, then let the table retain the dragged width.
     widths[3] += (ui.available_width() - default_table_width).max(0.0);
     let mut table = TableBuilder::new(ui)
         .id_salt((table_id, history))
@@ -1869,11 +1882,7 @@ fn capture_table_builder(
         .auto_shrink([false, false])
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
     for (index, width) in widths.into_iter().enumerate() {
-        table = table.column(
-            Column::initial(width)
-                .clip(true)
-                .resizable(!matches!(index, 3 | 8)),
-        );
+        table = table.column(Column::initial(width).clip(true).resizable(index != 8));
     }
     table
 }
@@ -1923,6 +1932,12 @@ mod selection_tests {
 
     #[test]
     fn capture_column_resize_stops_when_the_pointer_stops() {
+        for column in [3, 4] {
+            check_column_drag(column);
+        }
+    }
+
+    fn check_column_drag(column: usize) {
         let ctx = egui::Context::default();
         let frame = |events| {
             let mut width = 0.0;
@@ -1943,7 +1958,7 @@ mod selection_tests {
                             .header(28.0, |mut row| {
                                 for index in 0..9 {
                                     row.col(|ui| {
-                                        if index == 4 {
+                                        if index == column {
                                             let cell = ui.max_rect();
                                             separator = egui::pos2(
                                                 cell.right() + gap / 2.0,
@@ -1953,7 +1968,7 @@ mod selection_tests {
                                     });
                                 }
                             })
-                            .body(|body| width = body.widths()[4]);
+                            .body(|body| width = body.widths()[column]);
                     });
                 },
             )
