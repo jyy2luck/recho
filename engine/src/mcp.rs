@@ -799,9 +799,11 @@ async fn call_tool(directory: &Path, name: &str, args: &Value) -> Result<Value> 
     ] {
         if let Some(action) = name.strip_prefix(&format!("capture_{category}_")) {
             let belongs = |rule: &Value| match category {
-                "script" => ["request", "response"]
-                    .iter()
-                    .any(|p| rule[p].get("script").is_some() || rule[p].get("python").is_some()),
+                "script" => ["request", "response"].iter().any(|p| {
+                    ["script", "python", "scriptValue", "pythonValue"]
+                        .iter()
+                        .any(|key| rule[p].get(key).is_some())
+                }),
                 "breakpoint" => ["request", "response"]
                     .iter()
                     .any(|p| rule[p]["breakpoint"] == true),
@@ -810,7 +812,14 @@ async fn call_tool(directory: &Path, name: &str, args: &Value) -> Result<Value> 
                         || ["request", "response"].iter().any(|p| {
                             rule[p].as_object().is_some_and(|v| {
                                 v.keys().any(|k| {
-                                    !["script", "python", "breakpoint"].contains(&k.as_str())
+                                    ![
+                                        "script",
+                                        "python",
+                                        "scriptValue",
+                                        "pythonValue",
+                                        "breakpoint",
+                                    ]
+                                    .contains(&k.as_str())
                                 })
                             })
                         })

@@ -33,6 +33,54 @@ async function fixture(t) {
 }
 async function listen(server) { server.listen(0, '127.0.0.1'); await once(server, 'listening'); return server.address().port; }
 
+test('shared Values update rewritten and local responses without editing their rules', async t => {
+  const { engine, api, restart } = await fixture(t);
+  let upstreamHits = 0;
+  const origin = http.createServer((req, res) => {
+    upstreamHits++;
+    res.end('upstream');
+  });
+  const port = await listen(origin);
+  t.after(() => origin.close());
+  const authority = '127.0.0.1:' + port;
+  const base = 'http://' + authority;
+  const values = [
+    { id: 'shared', name: 'message.json', kind: 'json', text: '{"message":"first"}' },
+    { id: 'hook', name: 'normalize.js', kind: 'javascript', text: "response.headers['x-message'] = JSON.parse(response.body).message;" },
+  ];
+  assert.equal((await api('/rules/values', 'PUT', { values, expected: [] })).status, 200);
+  const rules = [
+    { id: 'rewrite', match: { url: base + '/rewrite' }, response: { mode: 'replace', status: 403, bodyValue: 'shared', scriptValue: 'hook' } },
+    { id: 'mock', match: { url: base + '/mock' }, mock: { status: 202, bodyValue: 'shared' } },
+  ];
+  assert.equal((await api('/rules', 'PUT', { rules, expected: [] })).status, 200);
+  const saved = (await api('/rules')).value.rules;
+  assert.equal(saved[0].response.bodyValue, 'shared');
+  assert.equal(saved[0].response.scriptValue, 'hook');
+  assert.equal(saved[1].mock.bodyValue, 'shared');
+  async function check(proxyPort, message) {
+    const proxy = 'http://127.0.0.1:' + proxyPort;
+    const rewrite = await fetch(proxy, { path: base + '/rewrite', headers: { host: authority } });
+    assert.equal(rewrite.status, 403);
+    assert.equal(rewrite.headers.get('x-message'), message);
+    assert.deepEqual(await rewrite.json(), { message });
+    const mock = await fetch(proxy, { path: base + '/mock', headers: { host: authority } });
+    assert.equal(mock.status, 202);
+    assert.deepEqual(await mock.json(), { message });
+  }
+  await check(engine.proxyPort, 'first');
+  const updated = [{ ...values[0], name: 'renamed.json', text: '{"message":"second"}' }, values[1]];
+  assert.equal((await api('/rules/values', 'PUT', { values: updated, expected: values })).status, 200);
+  assert.equal((await api('/rules/values', 'PUT', { values, expected: values })).status, 409);
+  assert.equal((await api('/rules/values', 'PUT', { values: [values[1]], expected: updated })).status, 400);
+  await check(engine.proxyPort, 'second');
+  const reopened = await restart();
+  assert.deepEqual((await api('/rules/values')).value.values, updated);
+  assert.deepEqual((await api('/rules')).value.rules, saved);
+  await check(reopened.proxyPort, 'second');
+  assert.equal(upstreamHits, 3);
+});
+
 test('MCP capture-list filters persist, preserve traffic and do not retroactively filter captures', async t => {
   const { directory, engine, api, restart } = await fixture(t);
   const origin = http.createServer(async (req, res) => {

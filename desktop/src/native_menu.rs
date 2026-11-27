@@ -29,6 +29,7 @@ enum Action {
     Collections,
     Environments,
     History,
+    RulesWorkspace,
     Tools,
     Library,
     Mcp,
@@ -177,6 +178,7 @@ fn install(mtm: MainThreadMarker, ctx: &egui::Context) -> Retained<RechoMenuTarg
         ("集合", "\u{f705}", Action::Collections),
         ("环境变量", "\u{f706}", Action::Environments),
         ("历史记录", "\u{f707}", Action::History),
+        ("规则", "", Action::RulesWorkspace),
     ] {
         add(&view, title, key, action);
     }
@@ -274,10 +276,11 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
             | Action::Clear
             | Action::Certificates(_)
             | Action::ExportCertificate(_) => app.ready,
+            Action::Save if app.navigation == Navigation::Rules => app.rules.workspace_can_save(),
             Action::Save => app.composer.active(),
             Action::CloseTab => {
                 app.mcp.is_open()
-                    || app.composer.active()
+                    || (app.navigation != Navigation::Rules && app.composer.active())
                     || (app.navigation == Navigation::Capture
                         && app.spaces.group != "default"
                         && app.spaces.current().is_some()
@@ -344,11 +347,14 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         }
         Action::ImportHar => app.choose_har(ctx, false),
         Action::ExportHar => app.choose_har(ctx, true),
+        Action::Save if app.navigation == Navigation::Rules => {
+            app.rules.save_workspace(&app.worker)
+        }
         Action::Save => app.composer.save_active(&app.worker),
         Action::CloseTab => {
             if app.mcp.is_open() {
                 app.mcp.back();
-            } else if app.composer.active() {
+            } else if app.navigation != Navigation::Rules && app.composer.active() {
                 app.composer.close_active(&app.worker);
             } else if let Some(scope) = app.history_scope.clone() {
                 app.close_history(&scope);
@@ -372,6 +378,7 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
         Action::Collections => app.navigate(Navigation::Collections),
         Action::Environments => app.navigate(Navigation::Environments),
         Action::History => app.navigate(Navigation::History),
+        Action::RulesWorkspace => app.navigate(Navigation::Rules),
         Action::Tools => app.navigate(Navigation::Tools),
         Action::Library => app.library.open(false),
         Action::Mcp => app.mcp.open(),

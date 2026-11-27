@@ -1,6 +1,7 @@
 mod breakpoint;
 mod editor;
 mod share;
+mod workspace;
 
 use crate::sharing::ShareUi;
 use crate::theme::{Theme, dialog_columns, dialog_footer, dialog_header, input_text};
@@ -56,9 +57,11 @@ impl RuleCategory {
     fn matches(self, rule: &Value) -> bool {
         let phases = [&rule["request"], &rule["response"]];
         let breakpoint = phases.iter().any(|action| action["breakpoint"] == true);
-        let script = phases
-            .iter()
-            .any(|action| action.get("python").is_some() || action.get("script").is_some());
+        let script = phases.iter().any(|action| {
+            ["python", "script", "pythonValue", "scriptValue"]
+                .iter()
+                .any(|key| action.get(key).is_some())
+        });
         match self {
             Self::All => true,
             Self::Breakpoint => breakpoint,
@@ -68,7 +71,14 @@ impl RuleCategory {
                     || phases.iter().any(|action| {
                         action.as_object().is_some_and(|object| {
                             object.keys().any(|key| {
-                                !matches!(key.as_str(), "breakpoint" | "python" | "script")
+                                !matches!(
+                                    key.as_str(),
+                                    "breakpoint"
+                                        | "python"
+                                        | "script"
+                                        | "pythonValue"
+                                        | "scriptValue"
+                                )
                             })
                         })
                     })
@@ -79,6 +89,7 @@ impl RuleCategory {
 
 #[derive(Default)]
 pub(super) struct RulesUi {
+    workspace: workspace::Workspace,
     open: bool,
     category: RuleCategory,
     rules: Option<Vec<Value>>,
@@ -109,6 +120,7 @@ enum RuleReply {
         reopen: bool,
         selected: Option<String>,
     },
+    SaveWorkspace(String),
     Toggle,
 }
 
@@ -178,18 +190,25 @@ impl RulesUi {
                                 if let Some(rule) =
                                     list.iter_mut().find(|rule| rule["id"] == value["id"])
                                 {
+                                    self.workspace.apply_rule_toggle(rule, &value);
                                     rule["enabled"] = value["enabled"].take();
                                 }
                             }
                         }
-                        RuleReply::Load | RuleReply::Save { .. } => {
+                        RuleReply::Load | RuleReply::Save { .. } | RuleReply::SaveWorkspace(_) => {
                             self.source_error = value["error"].as_str().map(str::to_owned);
                             self.rules = Some(items(&mut value, "rules"));
-                            if let RuleReply::Save { reopen, selected } = kind {
-                                self.selected = selected;
-                                if reopen {
-                                    self.editor = None;
+                            match kind {
+                                RuleReply::Save { reopen, selected } => {
+                                    self.selected = selected;
+                                    if reopen {
+                                        self.editor = None;
+                                    }
                                 }
+                                RuleReply::SaveWorkspace(id) => {
+                                    self.workspace.finish_rule_save(&id, Ok(()))
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -197,6 +216,9 @@ impl RulesUi {
                 Err(error) => match kind {
                     RuleReply::Save { reopen: true, .. } if self.editor.is_some() => {
                         self.editor.as_mut().unwrap().error = Some(error);
+                    }
+                    RuleReply::SaveWorkspace(id) => {
+                        self.workspace.finish_rule_save(&id, Err(error))
                     }
                     _ => self.error = Some(error),
                 },
@@ -222,6 +244,7 @@ impl RulesUi {
         if let Some(editor) = &mut self.editor {
             editor.poll();
         }
+        self.workspace.poll();
         if self.breakpoint.as_mut().is_some_and(Breakpoint::poll) {
             if let Some(existing) = self.breakpoint.take() {
                 self.deferred.insert(existing.id);
@@ -230,6 +253,7 @@ impl RulesUi {
     }
 
     fn refresh(&mut self, worker: &Worker) {
+        self.workspace.refresh_values(worker);
         if self.rules_reply.is_none() {
             self.send_rules(worker, "GET", "/rules", Value::Null, RuleReply::Load);
         }
@@ -449,9 +473,12 @@ impl RulesUi {
                     ui.menu_button("分享", |ui| {
                         if let Some(rule) =
                             selected.and_then(|index| self.rules.as_ref()?.get(index))
-                            && self
-                                .sharing
-                                .export_menu(ui, "recho-rule.json", || share::encode_rule(rule))
+                            && self.sharing.export_menu(ui, "recho-rule.json", || {
+                                share::encode_rule(
+                                    rule,
+                                    self.workspace.values.as_deref().unwrap_or_default(),
+                                )
+                            })
                         {
                             ui.close();
                         }
@@ -596,18 +623,22 @@ impl RulesUi {
                 });
             });
         if let Some((id, old, enabled)) = toggle {
-            self.send_rules(
-                worker,
-                "PATCH",
-                "/rules/enabled",
-                json!({"id": id, "expected": old, "enabled": enabled}),
-                RuleReply::Toggle,
-            );
+            self.toggle_rule(worker, id, old, enabled);
         } else if let Some(index) = edit_index {
             self.edit(index);
         } else if let Some((index, action)) = action {
             self.act(worker, index, action);
         }
+    }
+
+    fn toggle_rule(&mut self, worker: &Worker, id: String, old: bool, enabled: bool) {
+        self.send_rules(
+            worker,
+            "PATCH",
+            "/rules/enabled",
+            json!({"id": id, "expected": old, "enabled": enabled}),
+            RuleReply::Toggle,
+        );
     }
 
     fn edit(&mut self, index: usize) {
@@ -699,6 +730,8 @@ impl RulesUi {
         {
             self.send_rules(worker, "GET", "/rules", Value::Null, RuleReply::Load);
         }
+        self.workspace
+            .load_editor_values(worker, self.editor.is_some());
         let mut close_editor = false;
         let mut refresh = false;
         let mut save = None;
@@ -718,6 +751,7 @@ impl RulesUi {
                     saving,
                     keyboard: !blocked_by_breakpoint,
                     source_error: self.source_error.as_deref().or(self.error.as_deref()),
+                    values: self.workspace.values.as_deref().unwrap_or_default(),
                 },
                 &mut close_editor,
                 &mut refresh,
@@ -910,7 +944,12 @@ impl RulesUi {
                 return Err("请先加载规则列表。".into());
             };
             if save {
-                let bytes = serde_json::to_vec_pretty(&json!({"rules": rules}))
+                let values = self.workspace.values.as_deref().unwrap_or_default();
+                let exported = rules
+                    .iter()
+                    .map(|rule| share::inline_values(rule, values))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let bytes = serde_json::to_vec_pretty(&json!({"rules": exported}))
                     .map_err(|e| e.to_string())?;
                 recho_core::native::write_local_file(&path, &bytes)?;
             } else {

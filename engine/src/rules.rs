@@ -50,6 +50,105 @@ pub struct QueryEdit {
     replacement: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ValueKind {
+    Text,
+    Json,
+    Javascript,
+    Python,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleValue {
+    id: String,
+    name: String,
+    kind: ValueKind,
+    text: String,
+}
+
+fn validate_values(input: Value) -> Result<Vec<RuleValue>> {
+    let values: Vec<RuleValue> = serde_json::from_value(input)?;
+    let mut ids = HashSet::new();
+    for value in &values {
+        if value.id.trim().is_empty() || !ids.insert(&value.id) || value.name.trim().is_empty() {
+            return Err(Error::bad(
+                "Values need nonempty names and unique nonempty IDs",
+            ));
+        }
+        let result = match value.kind {
+            ValueKind::Text => Ok(()),
+            ValueKind::Json => serde_json::from_str::<Value>(&value.text)
+                .map(|_| ())
+                .map_err(Error::bad),
+            ValueKind::Javascript => javascript(&value.text, None, None, true, 100).map(|_| ()),
+            ValueKind::Python => crate::python::validate(&value.text),
+        };
+        result.map_err(|error| Error::bad(format!("Value {:?}: {error}", value.name)))?;
+    }
+    Ok(values)
+}
+
+struct ValueSources<'a> {
+    entries: BTreeMap<&'a str, (ValueKind, Arc<str>)>,
+    changed_kinds: HashSet<&'a str>,
+}
+
+impl<'a> ValueSources<'a> {
+    fn new(values: &'a [RuleValue], previous: &'a [RuleValue]) -> Self {
+        let entries: BTreeMap<_, _> = values
+            .iter()
+            .map(|value| {
+                (
+                    value.id.as_str(),
+                    (value.kind, Arc::from(value.text.as_str())),
+                )
+            })
+            .collect();
+        let changed_kinds = previous
+            .iter()
+            .filter(|value| {
+                entries
+                    .get(value.id.as_str())
+                    .is_some_and(|(kind, _)| *kind != value.kind)
+            })
+            .map(|value| value.id.as_str())
+            .collect();
+        Self {
+            entries,
+            changed_kinds,
+        }
+    }
+
+    fn resolve(&self, id: &str, field: &str, kinds: &[ValueKind]) -> Result<Arc<str>> {
+        let (kind, text) = self
+            .entries
+            .get(id)
+            .ok_or_else(|| Error::bad(format!("{field} references missing Value {id:?}")))?;
+        if self.changed_kinds.contains(id) {
+            return Err(Error::bad(format!(
+                "Cannot change the kind of Value {id:?} while {field} references it"
+            )));
+        }
+        if !kinds.contains(kind) {
+            return Err(Error::bad(format!(
+                "{field} references Value {id:?} of the wrong kind"
+            )));
+        }
+        Ok(text.clone())
+    }
+}
+
+const BODY_VALUE_KINDS: &[ValueKind] = &[ValueKind::Text, ValueKind::Json];
+
+#[derive(Clone, Default)]
+struct ResolvedValues {
+    body: Option<Arc<str>>,
+    script: Option<Arc<str>>,
+    python: Option<Arc<str>>,
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Action {
@@ -80,9 +179,17 @@ pub struct Action {
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    body_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     replace: Option<Replacement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    python_value: Option<String>,
+    #[serde(skip)]
+    resolved: ResolvedValues,
     #[serde(skip_serializing_if = "Option::is_none")]
     breakpoint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,6 +198,35 @@ pub struct Action {
     status: Option<u16>,
 }
 impl Action {
+    fn resolve(&mut self, values: &ValueSources<'_>) -> Result<()> {
+        self.resolved = ResolvedValues {
+            body: self
+                .body_value
+                .as_deref()
+                .map(|id| values.resolve(id, "bodyValue", BODY_VALUE_KINDS))
+                .transpose()?,
+            script: self
+                .script_value
+                .as_deref()
+                .map(|id| values.resolve(id, "scriptValue", &[ValueKind::Javascript]))
+                .transpose()?,
+            python: self
+                .python_value
+                .as_deref()
+                .map(|id| values.resolve(id, "pythonValue", &[ValueKind::Python]))
+                .transpose()?,
+        };
+        Ok(())
+    }
+    fn body(&self) -> Option<&str> {
+        self.body.as_deref().or(self.resolved.body.as_deref())
+    }
+    fn script(&self) -> Option<&str> {
+        self.script.as_deref().or(self.resolved.script.as_deref())
+    }
+    fn python(&self) -> Option<&str> {
+        self.python.as_deref().or(self.resolved.python.as_deref())
+    }
     fn validate(&mut self, phase: &str) -> Result<()> {
         if let Some(edits) = &self.edits {
             for edit in edits {
@@ -136,6 +272,15 @@ impl Action {
         }
         if self.body.is_some() && self.body_file.is_some() {
             return Err(Error::bad("Choose body or bodyFile"));
+        }
+        if self.body_value.is_some() && (self.body.is_some() || self.body_file.is_some()) {
+            return Err(Error::bad("Choose body, bodyFile, or bodyValue"));
+        }
+        if self.script_value.is_some() && self.script.is_some() {
+            return Err(Error::bad("Choose script or scriptValue"));
+        }
+        if self.python_value.is_some() && self.python.is_some() {
+            return Err(Error::bad("Choose python or pythonValue"));
         }
         if let Some(path) = &self.body_file {
             if !Path::new(path).is_absolute() {
@@ -220,15 +365,15 @@ impl Action {
             edits
                 .iter()
                 .any(|edit| edit.enabled && edit.r#type == "body")
-        }) || self.body.is_some()
+        }) || self.body().is_some()
             || self.body_file.is_some()
-            || self.python.is_some()
+            || self.python().is_some()
             || self.replace.is_some()
             || self
                 .body_replacements
                 .as_ref()
                 .is_some_and(|v| !v.is_empty())
-            || self.script.is_some()
+            || self.script().is_some()
             || self.breakpoint == Some(true)
     }
     fn rewrite(
@@ -287,8 +432,8 @@ impl Action {
             }
             *headers = normalize_headers(headers, false)?;
         }
-        if let Some(value) = &self.body {
-            *body = Some(value.clone());
+        if let Some(value) = self.body() {
+            *body = Some(value.to_owned());
             *binary = None;
         }
         if let Some(path) = &self.body_file {
@@ -436,8 +581,45 @@ pub struct Rule {
     response: Option<Action>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mock: Option<Value>,
+    #[serde(skip)]
+    mock_body: Option<Arc<str>>,
 }
 impl Rule {
+    fn resolve(&mut self, values: &ValueSources<'_>) -> Result<()> {
+        for (phase, action) in [
+            ("request", &mut self.request),
+            ("response", &mut self.response),
+        ] {
+            if let Some(action) = action {
+                action.resolve(values).map_err(|error| {
+                    Error::bad(format!("Rule {:?} {phase}: {error}", self.name))
+                })?;
+            }
+        }
+        self.mock_body = self
+            .mock
+            .as_ref()
+            .and_then(|mock| mock.get("bodyValue"))
+            .map(|id| {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| Error::bad("bodyValue must be a string"))?;
+                values.resolve(id, "bodyValue", BODY_VALUE_KINDS)
+            })
+            .transpose()
+            .map_err(|error| Error::bad(format!("Rule {:?} mock: {error}", self.name)))?;
+        Ok(())
+    }
+    fn mock_response(&self) -> Result<Option<ResponseData>> {
+        let Some(mut mock) = self.mock.clone() else {
+            return Ok(None);
+        };
+        if let Some(body) = &self.mock_body {
+            mock.as_object_mut().unwrap().remove("bodyValue");
+            mock["body"] = json!(body.as_ref());
+        }
+        Ok(Some(serde_json::from_value(mock)?))
+    }
     pub fn interceptors(&self) -> Vec<&'static str> {
         let actions: Vec<_> = self.request.iter().chain(self.response.iter()).collect();
         let mut kinds = vec![];
@@ -449,7 +631,7 @@ impl Rule {
                     || a.headers.is_some()
                     || a.header_edits.is_some()
                     || a.query.is_some()
-                    || a.body.is_some()
+                    || a.body().is_some()
                     || a.body_file.is_some()
                     || a.replace.is_some()
                     || a.body_replacements.is_some()
@@ -464,7 +646,7 @@ impl Rule {
         }
         if actions
             .iter()
-            .any(|a| a.python.is_some() || a.script.is_some())
+            .any(|a| a.python().is_some() || a.script().is_some())
         {
             kinds.push("脚本");
         }
@@ -475,17 +657,17 @@ impl Rule {
             || self
                 .response
                 .as_ref()
-                .is_some_and(|a| a.script.is_some() || a.python.is_some())
+                .is_some_and(|a| a.script().is_some() || a.python().is_some())
     }
     pub fn replaces_request_body(&self) -> bool {
         self.request
             .as_ref()
-            .is_some_and(|a| a.body.is_some() || a.body_file.is_some())
+            .is_some_and(|a| a.body().is_some() || a.body_file.is_some())
     }
     pub fn replaces_response_body(&self) -> bool {
         self.response
             .as_ref()
-            .is_some_and(|a| a.body.is_some() || a.body_file.is_some())
+            .is_some_and(|a| a.body().is_some() || a.body_file.is_some())
     }
     pub fn response_body(&self) -> bool {
         self.response.as_ref().is_some_and(Action::needs_body)
@@ -588,11 +770,21 @@ fn validate(values: Value) -> Result<Vec<Rule>> {
                 .as_object_mut()
                 .ok_or_else(|| Error::bad("mock must be an object"))?;
             object.entry("status").or_insert(json!(200));
-            if !object.contains_key("bodyBase64") {
+            let body_value = object.remove("bodyValue");
+            if body_value.is_some()
+                && (object.contains_key("body") || object.contains_key("bodyBase64"))
+            {
+                return Err(Error::bad("Choose mock body, bodyBase64, or bodyValue"));
+            }
+            if body_value.is_none() && !object.contains_key("bodyBase64") {
                 object.entry("body").or_insert(json!(""));
             }
             let response: ResponseData = serde_json::from_value(mock)?;
-            rule.mock = Some(serde_json::to_value(response.validate()?)?);
+            let mut normalized = serde_json::to_value(response.validate()?)?;
+            if let Some(body_value) = body_value {
+                normalized["bodyValue"] = body_value;
+            }
+            rule.mock = Some(normalized);
         }
         if rule.request.is_none() && rule.response.is_none() && rule.mock.is_none() {
             return Err(Error::bad("Rule needs request, response, or mock"));
@@ -658,8 +850,27 @@ struct Entry {
 }
 struct Saved {
     rules: Vec<Rule>,
+    values: Vec<RuleValue>,
     error: Option<String>,
 }
+
+impl Saved {
+    fn rules_reply(&self) -> Value {
+        json!({"rules": self.rules, "error": self.error})
+    }
+
+    fn values_reply(&self) -> Value {
+        json!({"values": self.values, "error": self.error})
+    }
+}
+
+#[derive(Serialize)]
+struct RulesFile<'a> {
+    rules: &'a [Rule],
+    #[serde(skip_serializing_if = "<[RuleValue]>::is_empty")]
+    values: &'a [RuleValue],
+}
+
 pub struct Rules {
     path: PathBuf,
     saved: Mutex<Saved>,
@@ -681,30 +892,53 @@ impl Drop for PauseGuard {
 impl Rules {
     pub fn open(directory: &Path, breakpoint_ms: u64, script_ms: u64) -> Arc<Self> {
         let path = directory.join("rules.json");
-        let loaded = (|| -> Result<Vec<Rule>> {
+        let loaded = (|| -> Result<Saved> {
             let data: Value = serde_json::from_slice(&fs::read(&path)?)?;
             let object = data
                 .as_object()
                 .ok_or_else(|| Error::bad("Saved rules must be an object"))?;
-            if object.len() != 1 {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "rules" | "values"))
+            {
                 return Err(Error::bad("Saved rules: unknown field"));
             }
-            validate(data["rules"].clone())
+            let values = data
+                .get("values")
+                .cloned()
+                .map(validate_values)
+                .transpose()?
+                .unwrap_or_default();
+            let mut rules = validate(data["rules"].clone())?;
+            let sources = ValueSources::new(&values, &[]);
+            for rule in &mut rules {
+                rule.resolve(&sources)?;
+            }
+            Ok(Saved {
+                rules,
+                values,
+                error: None,
+            })
         })();
-        let (rules, error) = match loaded {
-            Ok(rules) => (rules, None),
-            Err(_) if !path.exists() => (vec![], None),
-            Err(error) => (
-                vec![],
-                Some(format!(
+        let saved = match loaded {
+            Ok(saved) => saved,
+            Err(_) if !path.exists() => Saved {
+                rules: vec![],
+                values: vec![],
+                error: None,
+            },
+            Err(error) => Saved {
+                rules: vec![],
+                values: vec![],
+                error: Some(format!(
                     "Cannot load {}: {error}. The file has been preserved.",
                     path.display()
                 )),
-            ),
+            },
         };
         Arc::new(Self {
             path,
-            saved: Mutex::new(Saved { rules, error }),
+            saved: Mutex::new(saved),
             pending: Mutex::new(BTreeMap::new()),
             breakpoint_ms,
             script_ms,
@@ -712,15 +946,23 @@ impl Rules {
         })
     }
     pub fn get(&self) -> Value {
-        let saved = self.saved.lock().unwrap();
-        json!({"rules": saved.rules, "error": saved.error})
+        self.saved.lock().unwrap().rules_reply()
+    }
+    pub fn get_values(&self) -> Value {
+        self.saved.lock().unwrap().values_reply()
+    }
+    fn store(&self, rules: &[Rule], values: &[RuleValue]) -> Result<()> {
+        atomic_write(
+            &self.path,
+            &serde_json::to_vec_pretty(&RulesFile { rules, values })?,
+        )
     }
     #[cfg(test)]
     pub fn set(&self, values: Value) -> Result<Value> {
         self.set_expected(values, None)
     }
     pub fn set_expected(&self, values: Value, expected: Option<&Value>) -> Result<Value> {
-        let rules = validate(values)?;
+        let mut rules = validate(values)?;
         let mut saved = self.saved.lock().unwrap();
         if expected
             .is_some_and(|value| serde_json::to_value(&saved.rules).ok().as_ref() != Some(value))
@@ -730,12 +972,36 @@ impl Rules {
                 "Rules changed since they were loaded; reload before saving",
             ));
         }
-        atomic_write(
-            &self.path,
-            &serde_json::to_vec_pretty(&json!({"rules": rules}))?,
-        )?;
-        *saved = Saved { rules, error: None };
-        Ok(json!({"rules": saved.rules, "error": saved.error}))
+        let sources = ValueSources::new(&saved.values, &[]);
+        for rule in &mut rules {
+            rule.resolve(&sources)?;
+        }
+        self.store(&rules, &saved.values)?;
+        saved.rules = rules;
+        saved.error = None;
+        Ok(saved.rules_reply())
+    }
+    pub fn set_values(&self, input: Value, expected: &Value) -> Result<Value> {
+        let values = validate_values(input)?;
+        let mut saved = self.saved.lock().unwrap();
+        if let Some(error) = &saved.error {
+            return Err(Error::new(409, error));
+        }
+        if &serde_json::to_value(&saved.values)? != expected {
+            return Err(Error::new(
+                409,
+                "Values changed since they were loaded; reload before saving",
+            ));
+        }
+        let sources = ValueSources::new(&values, &saved.values);
+        let mut rules = saved.rules.clone();
+        for rule in &mut rules {
+            rule.resolve(&sources)?;
+        }
+        self.store(&rules, &values)?;
+        saved.rules = rules;
+        saved.values = values;
+        Ok(saved.values_reply())
     }
     pub fn set_enabled(&self, id: &str, enabled: bool, expected: bool) -> Result<Value> {
         let mut saved = self.saved.lock().unwrap();
@@ -757,10 +1023,7 @@ impl Rules {
         // script and regex in the table, nor send all sources over the API.
         let mut rules = saved.rules.clone();
         rules[index].enabled = enabled;
-        atomic_write(
-            &self.path,
-            &serde_json::to_vec_pretty(&json!({"rules":rules}))?,
-        )?;
+        self.store(&rules, &saved.values)?;
         saved.rules = rules;
         Ok(json!({"id":id,"enabled":enabled}))
     }
@@ -778,6 +1041,7 @@ impl Rules {
             .map(|mut rule| {
                 if !settings.rewrite_enabled {
                     rule.mock = None;
+                    rule.mock_body = None;
                 }
                 for action in [&mut rule.request, &mut rule.response]
                     .into_iter()
@@ -786,15 +1050,21 @@ impl Rules {
                     if !settings.rewrite_enabled {
                         let script = action.script.take();
                         let python = action.python.take();
+                        let resolved_script = action.resolved.script.take();
+                        let resolved_python = action.resolved.python.take();
                         let breakpoint = action.breakpoint;
                         *action = Action::default();
                         action.script = script;
                         action.python = python;
+                        action.resolved.script = resolved_script;
+                        action.resolved.python = resolved_python;
                         action.breakpoint = breakpoint;
                     }
                     if !settings.script_enabled {
                         action.script = None;
                         action.python = None;
+                        action.resolved.script = None;
+                        action.resolved.python = None;
                     }
                     if !settings.breakpoint_enabled {
                         action.breakpoint = None;
@@ -820,15 +1090,15 @@ impl Rules {
             .filter(|rule| {
                 rule.request.as_ref().is_some_and(|a| {
                     a.mode.is_none()
-                        && (a.body.is_some()
+                        && (a.body().is_some()
                             || a.body_file.is_some()
                             || a.headers.is_some()
                             || a.header_edits.is_some()
                             || a.replace.is_some()
                             || a.body_replacements.is_some()
                             || a.edits.is_some()
-                            || a.script.is_some()
-                            || a.python.is_some()
+                            || a.script().is_some()
+                            || a.python().is_some()
                             || a.breakpoint.is_some())
                 }) || rule.response.is_some()
                     || rule.mock.is_some()
@@ -1040,7 +1310,7 @@ impl Rules {
         for rule in ordered {
             if let Some(change) = &rule.request {
                 change.rewrite(&mut req.headers, &mut req.body, &mut req.binary_body)?;
-                if req.binary_body.is_some() && change.script.is_some() {
+                if req.binary_body.is_some() && change.script().is_some() {
                     return Err(Error::bad(
                         "JavaScript body editing requires UTF-8 text; Python supports binary data",
                     ));
@@ -1067,7 +1337,7 @@ impl Rules {
                         )?;
                     }
                 }
-                if let Some(source) = &change.python {
+                if let Some(source) = change.python() {
                     let (executable, python_timeout) = {
                         let settings = self.settings.lock().unwrap();
                         (
@@ -1088,7 +1358,7 @@ impl Rules {
                     req = updated.validate()?;
                     shared[&rule.id] = context;
                 }
-                if let Some(source) = &change.script {
+                if let Some(source) = change.script() {
                     req = serde_json::from_value::<RequestData>(
                         javascript(source, Some(&req), None, false, self.script_ms)?["request"]
                             .clone(),
@@ -1099,8 +1369,8 @@ impl Rules {
                     req = self.pause(rule, "request", req, None).await?.0;
                 }
             }
-            if let Some(mock) = &rule.mock {
-                return Ok((req, Some(serde_json::from_value(mock.clone())?)));
+            if let Some(mock) = rule.mock_response()? {
+                return Ok((req, Some(mock)));
             }
         }
         Ok((req, None))
@@ -1139,7 +1409,7 @@ impl Rules {
                 continue;
             };
             change.rewrite(&mut res.headers, &mut res.body, &mut res.binary_body)?;
-            if res.binary_body.is_some() && change.script.is_some() {
+            if res.binary_body.is_some() && change.script().is_some() {
                 return Err(Error::bad(
                     "JavaScript body editing requires UTF-8 text; Python supports binary data",
                 ));
@@ -1152,7 +1422,7 @@ impl Rules {
                     edit.apply(None, &mut res.headers, &mut res.body, &mut res.binary_body)?;
                 }
             }
-            if let Some(source) = &change.python {
+            if let Some(source) = change.python() {
                 let (executable, python_timeout) = {
                     let settings = self.settings.lock().unwrap();
                     (
@@ -1179,7 +1449,7 @@ impl Rules {
                 };
                 shared[&rule.id] = context;
             }
-            if let Some(source) = &change.script {
+            if let Some(source) = change.script() {
                 let updated = serde_json::from_value::<ResponseData>(
                     javascript(source, Some(req), Some(&res), false, self.script_ms)?["response"]
                         .clone(),

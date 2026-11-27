@@ -1554,6 +1554,18 @@ impl Engine {
                     Ok(json_reply(200, json!({"ok":true})))
                 }
                 ("GET", "/rules") => Ok(json_reply(200, self.rules.get())),
+                ("GET", "/rules/values") => Ok(json_reply(200, self.rules.get_values())),
+                ("PUT", "/rules/values") => {
+                    let input = self.read_json(&mut request).await?;
+                    if !input["expected"].is_array() {
+                        return Err(Error::bad("expected must be a Values array"));
+                    }
+                    let rules = self.rules.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        rules.set_values(input["values"].clone(), &input["expected"])
+                    }).await.map_err(Error::bad)??;
+                    Ok(json_reply(200, result))
+                }
                 ("PATCH", "/rules/enabled") => {
                     let input = self.read_json(&mut request).await?;
                     let id = input["id"].as_str().ok_or_else(|| Error::bad("id must be a string"))?.to_string();
@@ -1568,11 +1580,11 @@ impl Engine {
                 }
                 ("PUT", "/rules") => {
                     let input = self.read_json(&mut request).await?;
-                    Ok(json_reply(
-                        200,
-                        self.rules
-                            .set_expected(input["rules"].clone(), input.get("expected"))?,
-                    ))
+                    let rules = self.rules.clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        rules.set_expected(input["rules"].clone(), input.get("expected"))
+                    }).await.map_err(Error::bad)??;
+                    Ok(json_reply(200, result))
                 }
                 ("GET", "/script-logs") => Ok(json_reply(200, crate::python::logs())),
                 ("POST", "/rewrite/preview") => {

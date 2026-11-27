@@ -252,6 +252,7 @@ enum Navigation {
     Collections,
     Environments,
     History,
+    Rules,
     Tools,
 }
 
@@ -569,6 +570,9 @@ impl Recho {
     }
     fn navigate(&mut self, next: Navigation) {
         self.library.close();
+        if next == Navigation::Rules && self.navigation != next && self.ready {
+            self.rules.refresh_workspace(&self.worker);
+        }
         self.navigation = next;
         self.sidebar_visible = true;
         if next == Navigation::History {

@@ -16,27 +16,62 @@ enum Action {
 }
 
 impl Action {
+    const KINDS: [Self; 6] = [
+        Self::Redirect,
+        Self::Replace,
+        Self::Modify,
+        Self::Python,
+        Self::JavaScript,
+        Self::Breakpoint,
+    ];
+
     fn of(value: &Value) -> Self {
         if !value.is_object() {
             return Self::None;
         }
-        if value["breakpoint"] == true {
-            return Self::Breakpoint;
+        [
+            Self::Breakpoint,
+            Self::Redirect,
+            Self::Python,
+            Self::JavaScript,
+            Self::Replace,
+            Self::Modify,
+        ]
+        .into_iter()
+        .find(|kind| kind.present(value))
+        .unwrap_or(Self::Other)
+    }
+
+    fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Redirect => &["redirect"],
+            Self::Replace => &[
+                "method",
+                "path",
+                "status",
+                "headers",
+                "replaceHeaders",
+                "body",
+                "bodyFile",
+                "bodyValue",
+            ],
+            Self::Modify => &["edits"],
+            Self::Breakpoint => &["breakpoint"],
+            Self::Python => &["python", "pythonValue"],
+            Self::JavaScript => &["script", "scriptValue"],
+            _ => &[],
         }
-        for (key, kind) in [
-            ("redirect", Self::Redirect),
-            ("python", Self::Python),
-            ("script", Self::JavaScript),
-        ] {
-            if value.get(key).is_some() {
-                return kind;
-            }
-        }
-        match value["mode"].as_str() {
-            Some("replace") => Self::Replace,
-            Some("modify") => Self::Modify,
-            _ if value.get("edits").is_some() => Self::Modify,
-            _ => Self::Other,
+    }
+
+    fn present(self, value: &Value) -> bool {
+        match self {
+            Self::Breakpoint => value["breakpoint"] == true,
+            Self::Replace if value["mode"] == "replace" => true,
+            Self::Modify if value["mode"] == "modify" => true,
+            _ => self
+                .fields()
+                .iter()
+                .any(|field| value.get(*field).is_some()),
         }
     }
 
@@ -116,6 +151,7 @@ pub(super) struct DialogState<'a> {
     pub saving: bool,
     pub keyboard: bool,
     pub source_error: Option<&'a str>,
+    pub values: &'a [Value],
 }
 
 impl RuleEditor {
@@ -173,8 +209,10 @@ impl RuleEditor {
                 match result {
                     Ok(Some(path)) => {
                         if let Some(path) = path.to_str() {
-                            action.value["bodyFile"] = json!(path);
-                            self.dirty = true;
+                            if action.value.get("bodyFile").is_some() {
+                                action.value["bodyFile"] = json!(path);
+                                self.dirty = true;
+                            }
                         } else {
                             self.error = Some("文件路径包含无法保存的字符。".into());
                         }
@@ -228,6 +266,37 @@ impl RuleEditor {
         Ok(value)
     }
 
+    pub(super) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    pub(super) fn workspace_name(&self) -> &str {
+        label(&self.draft["name"])
+    }
+
+    pub(super) fn workspace_value(&self) -> Result<Value, String> {
+        self.read_advanced()
+    }
+
+    pub(super) fn apply_enabled_change(&mut self, previous: &Value, enabled: bool) {
+        if self.advanced.is_some() || self.baseline.as_ref() != Some(previous) {
+            return;
+        }
+        self.baseline.as_mut().unwrap()["enabled"] = json!(enabled);
+        if (self.draft["enabled"] != false) == (previous["enabled"] != false) {
+            self.draft["enabled"] = json!(enabled);
+        }
+    }
+
+    pub(super) fn workspace_form(
+        &mut self,
+        ui: &mut egui::Ui,
+        worker: &Worker,
+        values: &[Value],
+    ) -> Option<String> {
+        self.form(ui, worker, values, true)
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -256,7 +325,7 @@ impl RuleEditor {
                         if let Some(text) = &mut self.advanced {
                             self.dirty |= text_area(ui, text, 24);
                         } else {
-                            self.form(ui, worker);
+                            self.form(ui, worker, state.values, false);
                         }
                     });
                 });
@@ -350,7 +419,13 @@ impl RuleEditor {
         }
     }
 
-    fn form(&mut self, ui: &mut egui::Ui, worker: &Worker) {
+    fn form(
+        &mut self,
+        ui: &mut egui::Ui,
+        worker: &Worker,
+        values: &[Value],
+        workspace: bool,
+    ) -> Option<String> {
         self.dirty |= string_field(ui, &mut self.draft, "name", "名称", None);
         self.dirty |= string_field(ui, &mut self.draft, "folder", "文件夹", None);
         let mut enabled = self.draft["enabled"] != false;
@@ -378,25 +453,83 @@ impl RuleEditor {
         ui.label("排除 URL（每行一个）");
         self.dirty |= text_area(ui, &mut self.excludes, 2);
         ui.separator();
-        ui.horizontal(|ui| {
-            for (index, phase) in ["请求", "响应", "本地响应"].into_iter().enumerate() {
-                if ui.selectable_label(self.tab == index, phase).clicked() {
-                    self.tab = index;
+        const PHASES: [(&str, &str); 3] = [
+            ("request", "请求"),
+            ("response", "响应"),
+            ("mock", "本地响应"),
+        ];
+        if !workspace {
+            ui.horizontal(|ui| {
+                for (index, (_, title)) in PHASES.iter().enumerate() {
+                    if ui.selectable_label(self.tab == index, *title).clicked() {
+                        self.tab = index;
+                    }
+                }
+            });
+        }
+        let mut form = ActionForm {
+            worker,
+            values,
+            workspace,
+            open_value: None,
+        };
+        for (index, (phase, title)) in PHASES.into_iter().enumerate() {
+            let action = &mut self.actions[index];
+            if workspace && !action.value.is_object() || !workspace && self.tab != index {
+                continue;
+            }
+            if workspace {
+                ui.strong(title);
+            }
+            self.dirty |= ui
+                .push_id(phase, |ui| action.show(ui, phase, &mut form))
+                .inner;
+        }
+        ui.menu_button("添加动作", |ui| {
+            for (index, (phase, title)) in PHASES.into_iter().enumerate() {
+                if !workspace && index != self.tab {
+                    continue;
+                }
+                let action = &mut self.actions[index];
+                if phase == "mock" {
+                    if ui
+                        .add_enabled(!action.value.is_object(), egui::Button::new(title))
+                        .clicked()
+                    {
+                        *action = ActionEditor::new(default_mock());
+                        self.dirty = true;
+                        ui.close();
+                    }
+                    continue;
+                }
+                let mut add = |ui: &mut egui::Ui| {
+                    for kind in Action::KINDS {
+                        if (phase == "request" || kind != Action::Redirect)
+                            && !kind.present(&action.value)
+                            && ui.button(kind.name()).clicked()
+                        {
+                            action.add(kind, phase);
+                            self.dirty = true;
+                            ui.close();
+                        }
+                    }
+                };
+                if workspace {
+                    ui.menu_button(title, add);
+                } else {
+                    add(ui);
                 }
             }
         });
-        ui.push_id(self.tab, |ui| {
-            let phase = ["request", "response", "mock"][self.tab];
-            let action = &mut self.actions[self.tab];
-            self.dirty |= action.show(ui, worker, phase);
-            if self.relinking_import
-                && action.value.get("bodyFile").is_some()
-                && Action::of(&action.value) != Action::Replace
-            {
-                self.dirty |= action.body_file(ui);
-            }
-        });
+        form.open_value
     }
+}
+
+struct ActionForm<'a> {
+    worker: &'a Worker,
+    values: &'a [Value],
+    workspace: bool,
+    open_value: Option<String>,
 }
 
 struct ActionEditor {
@@ -433,66 +566,176 @@ impl ActionEditor {
         Ok(Some(value))
     }
 
-    fn show(&mut self, ui: &mut egui::Ui, worker: &Worker, phase: &str) -> bool {
-        if phase == "mock" {
-            let old = self.value.is_object();
-            let mut enabled = old;
-            let changed = ui.checkbox(&mut enabled, "启用本地响应").changed();
-            if changed {
-                *self = Self::new(if enabled { default_mock() } else { Value::Null });
-            }
-            if enabled {
-                return self.replacement(ui, phase) | changed;
-            }
-            return changed;
+    fn add(&mut self, kind: Action, phase: &str) {
+        let mut fields = kind.create(phase);
+        let fields = fields.as_object_mut().expect("Rule actions have fields");
+        if kind == Action::Modify && self.value["mode"] == "replace" {
+            fields.remove("mode");
         }
-        let selected = Action::of(&self.value);
-        let mut kind = selected;
-        egui::ComboBox::from_label("行为")
-            .selected_text(kind.name())
-            .show_ui(ui, |ui| {
-                for choice in [
-                    Action::None,
-                    Action::Redirect,
-                    Action::Replace,
-                    Action::Modify,
-                    Action::Breakpoint,
-                    Action::Python,
-                    Action::JavaScript,
-                ] {
-                    if choice != Action::Redirect || phase == "request" {
-                        ui.selectable_value(&mut kind, choice, choice.name());
-                    }
-                }
-            });
-        let changed = selected != kind;
-        if changed {
-            *self = Self::new(kind.create(phase));
+        if !self.value.is_object() {
+            self.value = json!({});
         }
-        let fields_changed = match kind {
-            Action::Redirect => string_field(
-                ui,
-                &mut self.value,
-                "redirect",
-                "目标 URL",
-                Some("http://localhost:8080/"),
-            ),
-            Action::Replace => self.replacement(ui, phase),
-            Action::Modify => self.modifier(ui, worker, phase),
-            Action::Python => multiline_field(ui, &mut self.value, "python", "Python 源码", 8),
-            Action::JavaScript => {
-                multiline_field(ui, &mut self.value, "script", "JavaScript 源码", 8)
-            }
-            Action::Other => {
-                ui.weak("通过高级 JSON 编辑此行为。");
-                false
-            }
-            _ => false,
-        };
-        changed || fields_changed
+        self.value.as_object_mut().unwrap().append(fields);
     }
 
-    fn replacement(&mut self, ui: &mut egui::Ui, phase: &str) -> bool {
+    fn remove(&mut self, kind: Action) {
+        let fields = self.value.as_object_mut().expect("Rule action is present");
+        for field in kind.fields() {
+            fields.remove(*field);
+        }
+        match kind {
+            Action::Redirect => {
+                fields.remove("preserveHost");
+            }
+            Action::Replace => {
+                self.headers = None;
+                self.file_pick = None;
+                if fields.get("mode").is_some_and(|m| m == "replace") {
+                    fields.remove("mode");
+                }
+            }
+            Action::Modify => {
+                if fields.get("mode").is_some_and(|m| m == "modify") {
+                    fields.remove("mode");
+                }
+                self.edit_index = 0;
+                self.preview = None;
+                self.preview_reply = None;
+            }
+            _ => {}
+        }
+        if fields.is_empty() {
+            self.value = Value::Null;
+        }
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui, phase: &str, form: &mut ActionForm<'_>) -> bool {
+        if phase == "mock" {
+            if !self.value.is_object() {
+                return false;
+            }
+            if ui.small_button("移除本地响应").clicked() {
+                *self = Self::new(Value::Null);
+                return true;
+            }
+            return self.replacement(ui, phase, form);
+        }
+        let mut changed = false;
+        for kind in Action::KINDS {
+            if !kind.present(&self.value) {
+                continue;
+            }
+            ui.group(|ui| {
+                ui.set_width(ui.available_width());
+                ui.push_id(kind.name(), |ui| {
+                    let mut remove = false;
+                    ui.horizontal(|ui| {
+                        ui.strong(kind.name());
+                        remove = ui.small_button("移除").clicked();
+                    });
+                    if remove {
+                        self.remove(kind);
+                        changed = true;
+                        return;
+                    }
+                    changed |= match kind {
+                        Action::Redirect => {
+                            if self.value["mode"] == "replace" || self.value["mode"] == "modify" {
+                                ui.weak("重定向后会用目标 URL 重新匹配规则。");
+                            }
+                            string_field(
+                                ui,
+                                &mut self.value,
+                                "redirect",
+                                "目标 URL",
+                                Some("http://localhost:8080/"),
+                            ) | bool_field(
+                                ui,
+                                &mut self.value,
+                                "preserveHost",
+                                "保留原 Host",
+                                false,
+                            )
+                        }
+                        Action::Replace => self.replacement(ui, phase, form),
+                        Action::Modify => self.modifier(ui, form.worker, phase),
+                        Action::Python => self.script(ui, "python", "pythonValue", "python", form),
+                        Action::JavaScript => {
+                            self.script(ui, "script", "scriptValue", "javascript", form)
+                        }
+                        _ => false,
+                    };
+                });
+            });
+        }
+        if Action::of(&self.value) == Action::Other
+            || ["query", "headerEdits", "bodyReplacements", "replace"]
+                .iter()
+                .any(|key| self.value.get(*key).is_some())
+        {
+            ui.weak("可通过弹窗的高级 JSON 编辑其他动作字段。");
+        }
+        changed
+    }
+
+    fn script(
+        &mut self,
+        ui: &mut egui::Ui,
+        inline: &str,
+        reference: &str,
+        kind: &str,
+        form: &mut ActionForm<'_>,
+    ) -> bool {
+        let was_reference = self.value.get(reference).is_some();
+        let mut use_reference = was_reference;
+        egui::ComboBox::from_label("脚本来源")
+            .selected_text(if use_reference {
+                "引用 Value"
+            } else {
+                "内联"
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut use_reference, false, "内联");
+                ui.selectable_value(&mut use_reference, true, "引用 Value");
+            });
+        if use_reference != was_reference {
+            if use_reference {
+                self.value.as_object_mut().unwrap().remove(inline);
+                self.value[reference] = json!("");
+            } else {
+                let text = value_text(form.values, &self.value[reference]).to_owned();
+                self.value.as_object_mut().unwrap().remove(reference);
+                self.value[inline] = json!(text);
+            }
+        }
+        let edited = if use_reference {
+            value_picker(ui, &mut self.value, reference, &[kind], form)
+        } else {
+            let id = ui.id().with("expanded_script");
+            let mut expanded = ui.data(|data| data.get_temp::<bool>(id)).unwrap_or(false);
+            if ui
+                .small_button(if expanded {
+                    "收起编辑区"
+                } else {
+                    "展开编辑区"
+                })
+                .clicked()
+            {
+                expanded = !expanded;
+                ui.data_mut(|data| data.insert_temp(id, expanded));
+            }
+            multiline_field(
+                ui,
+                &mut self.value,
+                inline,
+                "",
+                if expanded { 22 } else { 8 },
+            )
+        };
+        use_reference != was_reference || edited
+    }
+
+    fn replacement(&mut self, ui: &mut egui::Ui, phase: &str, form: &mut ActionForm<'_>) -> bool {
         let mut changed = false;
         if phase == "request" {
             changed |= string_field(
@@ -503,7 +746,6 @@ impl ActionEditor {
                 Some("保留原方法"),
             );
             changed |= string_field(ui, &mut self.value, "path", "替换路径", Some("保留原路径"));
-            changed |= bool_field(ui, &mut self.value, "preserveHost", "保留原 Host", false);
         } else if optional(
             ui,
             &mut self.value,
@@ -532,6 +774,9 @@ impl ActionEditor {
             &mut changed,
         );
         if headers_enabled {
+            if phase != "mock" && self.value["mode"] != "replace" {
+                changed |= bool_field(ui, &mut self.value, "replaceHeaders", "替换原消息头", false);
+            }
             if let Some(draft) = &mut self.headers {
                 changed |= text_area(ui, draft, 4);
             } else {
@@ -544,7 +789,9 @@ impl ActionEditor {
         } else {
             self.headers = None;
         }
-        let mut body_kind = if self.value.get("bodyFile").is_some() {
+        let mut body_kind = if self.value.get("bodyValue").is_some() {
+            "bodyValue"
+        } else if self.value.get("bodyFile").is_some() {
             "bodyFile"
         } else if self.value.get("bodyBase64").is_some() {
             "bodyBase64"
@@ -556,16 +803,17 @@ impl ActionEditor {
         let old = body_kind;
         let kinds = [
             ("", "保留原正文"),
-            ("body", "文本正文"),
+            ("body", "内联文本"),
             ("bodyBase64", "Base64 正文"),
             ("bodyFile", "正文文件"),
+            ("bodyValue", "引用 Value"),
         ];
         egui::ComboBox::from_label("正文")
             .selected_text(kinds.iter().find(|(key, _)| *key == body_kind).unwrap().1)
             .show_ui(ui, |ui| {
                 for (key, caption) in kinds {
                     if if phase == "mock" {
-                        key == "body" || key == "bodyBase64"
+                        ["body", "bodyBase64", "bodyValue"].contains(&key)
                     } else {
                         key != "bodyBase64"
                     } {
@@ -574,14 +822,20 @@ impl ActionEditor {
                 }
             });
         if old != body_kind {
+            let text = if old == "bodyValue" && body_kind == "body" {
+                value_text(form.values, &self.value["bodyValue"]).to_owned()
+            } else {
+                String::new()
+            };
             for (key, _) in kinds {
                 if !key.is_empty() {
                     self.value.as_object_mut().unwrap().remove(key);
                 }
             }
             if !body_kind.is_empty() {
-                self.value[body_kind] = json!("");
+                self.value[body_kind] = json!(text);
             }
+            self.file_pick = None;
             changed = true;
         }
         match body_kind {
@@ -589,7 +843,18 @@ impl ActionEditor {
                 changed |= multiline_field(ui, &mut self.value, body_kind, "", 6);
             }
             "bodyFile" => changed |= self.body_file(ui),
+            "bodyValue" => {
+                changed |= value_picker(ui, &mut self.value, "bodyValue", &["text", "json"], form)
+            }
             _ => {}
+        }
+        if changed
+            && self.value["mode"] == "modify"
+            && ["method", "path", "status"]
+                .iter()
+                .any(|key| self.value.get(*key).is_some())
+        {
+            self.value["mode"] = json!("replace");
         }
         changed
     }
@@ -743,6 +1008,71 @@ impl ActionEditor {
     }
 }
 
+fn value_text<'a>(values: &'a [Value], id: &Value) -> &'a str {
+    values
+        .iter()
+        .find(|value| &value["id"] == id)
+        .map_or("", |value| label(&value["text"]))
+}
+
+fn value_picker(
+    ui: &mut egui::Ui,
+    object: &mut Value,
+    key: &str,
+    kinds: &[&str],
+    form: &mut ActionForm<'_>,
+) -> bool {
+    let mut id = label(&object[key]);
+    let previous = id;
+    let values = form.values;
+    let matches_kind = |value: &&Value| kinds.contains(&label(&value["kind"]));
+    let find = |id: &str| {
+        values
+            .iter()
+            .filter(matches_kind)
+            .find(|value| value["id"] == id)
+    };
+    let current = find(id).map_or_else(
+        || {
+            if id.is_empty() {
+                "选择 Value"
+            } else {
+                "找不到 Value"
+            }
+        },
+        |value| label(&value["name"]),
+    );
+    egui::ComboBox::from_id_salt(key)
+        .selected_text(current)
+        .show_ui(ui, |ui| {
+            let mut choices = values.iter().filter(matches_kind).peekable();
+            if choices.peek().is_none() {
+                ui.weak("请先在 Values 中创建可引用的内容。");
+            }
+            for value in choices {
+                ui.selectable_value(&mut id, label(&value["id"]), label(&value["name"]));
+            }
+        });
+    if let Some(value) = find(id) {
+        ui.collapsing("查看 Value", |ui| {
+            if form.workspace && ui.button("在 Values 中编辑").clicked() {
+                form.open_value = Some(id.to_owned());
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("value_preview")
+                .max_height(150.0)
+                .show(ui, |ui| {
+                    ui.monospace(label(&value["text"]));
+                });
+        });
+    }
+    let changed = id != previous;
+    if changed {
+        object[key] = json!(id);
+    }
+    changed
+}
+
 fn optional(
     ui: &mut egui::Ui,
     value: &mut Value,
@@ -843,10 +1173,34 @@ mod tests {
         });
         let mut editor = RuleEditor::new(initial.clone(), Some(initial.clone()));
         editor.draft["name"] = json!("renamed");
+        editor.apply_enabled_change(&initial, false);
         let actual = editor.value().unwrap();
         assert_eq!(actual["request"], initial["request"]);
         assert_eq!(actual["response"], initial["response"]);
         assert_eq!(actual["match"], initial["match"]);
         assert_eq!(actual["name"], "renamed");
+        assert_eq!(actual["enabled"], false);
+        assert_eq!(editor.baseline.unwrap()["enabled"], false);
+    }
+
+    #[test]
+    fn adding_and_removing_an_action_preserves_other_actions_and_references() {
+        let mut response = ActionEditor::new(json!({
+            "mode": "replace", "status": 403, "bodyValue": "denial", "scriptValue": "formatter"
+        }));
+        response.add(Action::Modify, "response");
+        response.add(Action::Python, "response");
+        assert_eq!(response.value["mode"], "replace");
+        assert_eq!(response.value["status"], 403);
+        assert!(Action::JavaScript.present(&response.value));
+        response.remove(Action::JavaScript);
+        assert_eq!(response.value["bodyValue"], "denial");
+        assert!(Action::Modify.present(&response.value));
+        assert!(Action::Python.present(&response.value));
+        assert!(!Action::JavaScript.present(&response.value));
+        response.remove(Action::Replace);
+        assert!(Action::Modify.present(&response.value));
+        assert!(Action::Python.present(&response.value));
+        assert!(response.value.get("bodyValue").is_none());
     }
 }

@@ -4,8 +4,32 @@ use serde_json::{Value, json};
 
 const KIND: &str = "recho.rule";
 
-pub(super) fn encode_rule(rule: &Value) -> Result<String, String> {
-    sharing::encode(KIND, &portable(rule.clone())?)
+pub(super) fn encode_rule(rule: &Value, values: &[Value]) -> Result<String, String> {
+    sharing::encode(KIND, &portable(inline_values(rule, values)?)?)
+}
+
+pub(super) fn inline_values(rule: &Value, values: &[Value]) -> Result<Value, String> {
+    let mut rule = rule.clone();
+    for phase in ["request", "response", "mock"] {
+        let Some(action) = rule.get_mut(phase).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for (reference, inline) in [
+            ("bodyValue", "body"),
+            ("scriptValue", "script"),
+            ("pythonValue", "python"),
+        ] {
+            if let Some(id) = action.remove(reference) {
+                let text = values
+                    .iter()
+                    .find(|value| value["id"] == id)
+                    .and_then(|value| value["text"].as_str())
+                    .ok_or("找不到规则引用的 Value，请刷新后重试。")?;
+                action.insert(inline.into(), json!(text));
+            }
+        }
+    }
+    Ok(rule)
 }
 
 pub(super) fn preview_rule(text: &str) -> Result<(Value, String), String> {
@@ -78,7 +102,7 @@ mod tests {
             "match": {"url":"https://example.com/*", "method": "*"},
             "response": {"bodyFile":"/Users/alice/private.json", "python":"# 中文\npass\n"}
         });
-        let shared = encode_rule(&rule).unwrap();
+        let shared = encode_rule(&rule, &[]).unwrap();
         assert!(!shared.contains("/Users/alice"));
         assert!(!shared.contains("existing"));
         let (imported, preview) = preview_rule(&shared).unwrap();
@@ -87,5 +111,25 @@ mod tests {
         assert_eq!(imported["response"]["bodyFile"], "");
         assert_eq!(imported["response"]["python"], rule["response"]["python"]);
         assert!(preview.contains("本机路径"));
+    }
+
+    #[test]
+    fn exported_rules_carry_the_referenced_text() {
+        let rule = json!({
+            "name": "分享风控",
+            "match": {"url": "https://example.test/share"},
+            "response": {"bodyValue": "body", "scriptValue": "code"}
+        });
+        let values = [
+            json!({"id": "body", "text": "{\"error\":\"denied\"}"}),
+            json!({"id": "code", "text": "response.status = 403;"}),
+        ];
+        let encoded = encode_rule(&rule, &values).unwrap();
+        let (imported, _) = preview_rule(&encoded).unwrap();
+        assert_eq!(
+            imported["response"],
+            json!({"body": values[0]["text"], "script": values[1]["text"]})
+        );
+        assert!(encode_rule(&rule, &values[..1]).is_err());
     }
 }

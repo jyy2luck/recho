@@ -288,7 +288,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
     }) && app.ready
     {
         app.composer.open_new();
-        if app.navigation == Navigation::History {
+        if matches!(app.navigation, Navigation::History | Navigation::Rules) {
             app.navigate(Navigation::Capture);
         }
     }
@@ -324,7 +324,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             .clicked()
                         {
                             app.composer.open_new();
-                            if app.navigation == Navigation::History {
+                            if matches!(app.navigation, Navigation::History | Navigation::Rules) {
                                 app.navigate(Navigation::Capture);
                             }
                             ui.close();
@@ -334,7 +334,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                             .clicked()
                         {
                             app.composer.open_raw();
-                            if app.navigation == Navigation::History {
+                            if matches!(app.navigation, Navigation::History | Navigation::Rules) {
                                 app.navigate(Navigation::Capture);
                             }
                             ui.close();
@@ -367,6 +367,10 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                         }
                     }),
                     ("视图", |app, ui| {
+                        if ui.button("规则").clicked() {
+                            app.navigate(Navigation::Rules);
+                            ui.close();
+                        }
                         ui.checkbox(&mut app.sidebar_visible, "显示侧边栏");
                         if ui.checkbox(&mut app.details_open, "显示详情").changed()
                             && app.details_open
@@ -584,15 +588,17 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 {
                     app.navigate(Navigation::Tools);
                 }
-                ui.label(format!(
-                    "共 {} 项 · 已选择 {}",
-                    if let Some(tab) = app.active_history() {
-                        tab.rows.len()
-                    } else {
-                        app.visible.len()
-                    },
-                    app.selection.len()
-                ));
+                if app.navigation != Navigation::Rules {
+                    ui.label(format!(
+                        "共 {} 项 · 已选择 {}",
+                        if let Some(tab) = app.active_history() {
+                            tab.rows.len()
+                        } else {
+                            app.visible.len()
+                        },
+                        app.selection.len()
+                    ));
+                }
                 if let Some(notice) = &app.notice {
                     ui.label(notice);
                     if ui.small_button("×").clicked() {
@@ -622,6 +628,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 ("\u{e53b}", "集合 (F2)", Navigation::Collections),
                 ("\u{e24a}", "环境变量 (F3)", Navigation::Environments),
                 ("\u{e889}", "历史 (F4)", Navigation::History),
+                ("\u{e241}", "规则", Navigation::Rules),
                 ("\u{e869}", "调试工具", Navigation::Tools),
             ] {
                 let response = ui.add(
@@ -648,7 +655,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 }
             });
         });
-    if app.sidebar_visible {
+    if app.sidebar_visible && app.navigation != Navigation::Rules {
         egui::Panel::left("sidebar")
             .default_size(260.0)
             .min_size(180.0)
@@ -669,6 +676,15 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
         )
         .show(ui, |ui| {
             proxy_bar(app, ui);
+            if app.navigation == Navigation::Rules && !app.library.is_open() {
+                ui.separator();
+                if app.ready {
+                    app.rules.workspace(ui, &app.worker, app.sidebar_visible);
+                } else {
+                    ui.spinner();
+                }
+                return;
+            }
             egui::ScrollArea::horizontal()
                 .id_salt("tabs")
                 .show(ui, |ui| {
@@ -738,6 +754,9 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 if let Some(captured) = app.library.show(ui, &app.worker) {
                     app.library.close();
                     app.composer.open_library_capture(captured);
+                    if app.navigation == Navigation::Rules {
+                        app.navigate(Navigation::Capture);
+                    }
                 }
                 return;
             }

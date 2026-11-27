@@ -20,6 +20,151 @@ fn fixture(breakpoint: u64) -> (tempfile::TempDir, Arc<Rules>) {
     (dir, rules)
 }
 
+#[tokio::test]
+async fn values_resolve_by_id_and_updates_keep_in_flight_rules_consistent() {
+    let (directory, rules) = fixture(1000);
+    let values = json!([
+        {"id":"body","name":"Example body","kind":"json","text":"{\"item\":1}"},
+        {"id":"response","name":"Annotate response","kind":"javascript","text":"response.headers['x-from-value'] = request.body;"}
+    ]);
+    rules.set_values(values.clone(), &json!([])).unwrap();
+    let mut referenced = rule();
+    referenced["request"] = json!({"bodyValue":"body"});
+    referenced["mock"] = json!({"status":403,"bodyValue":"body"});
+    referenced["response"] = json!({"bodyValue":"body","scriptValue":"response"});
+    let saved = rules.set(json!([referenced])).unwrap();
+    assert_eq!(saved["rules"][0]["mock"]["bodyValue"], "body");
+    assert!(
+        !saved["rules"][0]["mock"]
+            .as_object()
+            .unwrap()
+            .contains_key("body")
+    );
+    assert_eq!(saved["rules"][0]["response"]["scriptValue"], "response");
+    assert!(
+        !saved["rules"][0]["response"]
+            .as_object()
+            .unwrap()
+            .contains_key("script")
+    );
+
+    let selected_before_edit = rules.matching(&request());
+    let mut edited = values.clone();
+    edited[0]["name"] = json!("Renamed body");
+    edited[0]["text"] = json!("{\"item\":2}");
+    rules.set_values(edited.clone(), &values).unwrap();
+    assert_eq!(rules.get(), saved);
+    assert_eq!(
+        rules
+            .set_values(values.clone(), &values)
+            .unwrap_err()
+            .status,
+        409
+    );
+
+    let restarted = Rules::open(directory.path(), 1000, 20);
+    assert_eq!(restarted.get(), saved);
+    assert_eq!(restarted.get_values()["values"], edited);
+    for (selected, expected) in [
+        (selected_before_edit, "{\"item\":1}"),
+        (rules.matching(&request()), "{\"item\":2}"),
+        (restarted.matching(&request()), "{\"item\":2}"),
+    ] {
+        assert!(selected[0].request_body());
+        assert!(selected[0].response_body());
+        assert_eq!(selected[0].interceptors(), ["重写", "脚本"]);
+        let (changed, mocked) = rules.apply_request(request(), &selected).await.unwrap();
+        assert_eq!(changed.body.as_deref(), Some(expected));
+        let mocked = mocked.unwrap();
+        assert_eq!(mocked.status, 403);
+        assert_eq!(mocked.body.as_deref(), Some(expected));
+        let result = rules
+            .apply_response(&changed, mocked, &selected)
+            .await
+            .unwrap();
+        assert_eq!(result.headers["x-from-value"], expected);
+        assert_eq!(result.body.as_deref(), Some(expected));
+    }
+
+    let mut settings = crate::settings::Settings::default();
+    settings.rewrite_enabled = false;
+    rules.configure(&settings);
+    assert_eq!(rules.matching(&request())[0].interceptors(), ["脚本"]);
+    settings.rewrite_enabled = true;
+    settings.script_enabled = false;
+    rules.configure(&settings);
+    assert_eq!(rules.matching(&request())[0].interceptors(), ["重写"]);
+}
+
+#[test]
+fn invalid_values_and_references_leave_saved_rules_and_values_intact() {
+    let (directory, rules) = fixture(1000);
+    let values = json!([
+        {"id":"body","name":"Text","kind":"text","text":"1"},
+        {"id":"python","name":"Python","kind":"python","text":"def onResponse(context, response): return response"}
+    ]);
+    rules.set_values(values.clone(), &json!([])).unwrap();
+    let mut disabled = rule();
+    disabled["enabled"] = json!(false);
+    disabled["response"] = json!({"bodyValue":"body","pythonValue":"python"});
+    let before = rules.set(json!([disabled.clone()])).unwrap();
+    let path = directory.path().join("rules.json");
+    let snapshot = fs::read(&path).unwrap();
+
+    for invalid_action in [
+        json!({"body":"inline","bodyValue":"body"}),
+        json!({"bodyFile":"abc","bodyValue":"body"}),
+        json!({"bodyValue":"python"}),
+        json!({"bodyValue":"absent"}),
+        json!({"bodyValue":null}),
+        json!({"scriptValue":"python"}),
+        json!({"script":"", "scriptValue":"python"}),
+        json!({"pythonValue":"absent"}),
+        json!({"python":"inline", "pythonValue":"python"}),
+    ] {
+        let mut invalid = disabled.clone();
+        invalid["response"] = invalid_action;
+        assert!(rules.set(json!([invalid])).is_err());
+    }
+    for invalid_mock in [
+        json!({"bodyValue":"body","bodyBase64":"AA=="}),
+        json!({"bodyValue":"body","body":"inline"}),
+        json!({"bodyValue":3}),
+    ] {
+        let mut invalid = disabled.clone();
+        invalid["mock"] = invalid_mock;
+        assert!(rules.set(json!([invalid])).is_err());
+    }
+
+    let mut edited = values.clone();
+    edited[0]["kind"] = json!("json");
+    assert!(rules.set_values(edited, &values).is_err());
+    assert!(rules.set_values(json!([values[1]]), &values).is_err());
+    assert!(rules.set_values(json!([values[0]]), &values).is_err());
+    for invalid in [
+        json!({"id":"new","name":"Bad JSON","kind":"json","text":"{"}),
+        json!({"id":"new","name":"Bad JavaScript","kind":"javascript","text":"if ("}),
+        json!({"id":"new","name":"Empty Python","kind":"python","text":"  "}),
+        values[0].clone(),
+    ] {
+        assert!(
+            rules
+                .set_values(json!([values[0], values[1], invalid]), &values)
+                .is_err()
+        );
+    }
+    assert_eq!(rules.get(), before);
+    assert_eq!(rules.get_values()["values"], values);
+    assert_eq!(fs::read(&path).unwrap(), snapshot);
+
+    rules.set(json!([])).unwrap();
+    rules.set_values(json!([]), &values).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap(),
+        json!({"rules":[]})
+    );
+}
+
 #[test]
 fn single_rule_toggle_preserves_actions_conflicts_and_failed_writes() {
     let (directory, rules) = fixture(1000);
