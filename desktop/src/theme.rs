@@ -62,7 +62,7 @@ pub(super) struct Palette {
 }
 
 pub(super) const CONTROL_HEIGHT: f32 = 32.0;
-const CONTROL_RADIUS: u8 = 5;
+pub(super) const CONTROL_RADIUS: u8 = 5;
 
 pub(super) fn control_row(ui: &mut egui::Ui) {
     ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;

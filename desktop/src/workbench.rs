@@ -1,7 +1,8 @@
 use super::*;
 use crate::certificate_ui::Page as CertificatePage;
 use crate::theme::{
-    CONTROL_HEIGHT, Palette, Theme, control_row, dialog_footer, dialog_header, paint_workbench_tab,
+    CONTROL_HEIGHT, CONTROL_RADIUS, Palette, Theme, control_row, dialog_footer, dialog_header,
+    paint_workbench_tab,
 };
 use egui_extras::{Column, TableBuilder};
 
@@ -1615,6 +1616,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
             } else {
                 table
             };
+            let mut hover_outline = None;
             table
                 .header(28.0, |mut row| {
                     for (index, title) in [
@@ -1668,7 +1670,11 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         });
                     }
                 })
-                .body(|body| {
+                .body(|mut body| {
+                    let ui = body.ui_mut();
+                    let painter = ui.painter().clone();
+                    let hover_stroke = ui.visuals().widgets.hovered.bg_stroke;
+                    let pointer_present = ui.ctx().pointer_hover_pos().is_some();
                     body.rows(26.0, rows.len(), |mut table_row| {
                         let row = rows[table_row.index()];
                         table_row.set_selected(app.selection.contains(&row.id));
@@ -1717,8 +1723,10 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                             Some("青色") => Some(cyan),
                             _ => None,
                         };
+                        let mut row_rect = egui::Rect::NOTHING;
                         for (index, text) in cells.into_iter().enumerate() {
                             table_row.col(|ui| {
+                                row_rect = row_rect.union(ui.max_rect());
                                 capture_cell(ui, index, |ui| {
                                     let mut text = RichText::new(text)
                                         .font(egui::FontId::new(
@@ -1755,6 +1763,14 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                                     ui.add(egui::Label::new(text).truncate().selectable(false));
                                 })
                             });
+                        }
+                        if pointer_present
+                            && painter.ctx().rect_contains_pointer(
+                                painter.layer_id(),
+                                row_rect.intersect(painter.clip_rect()),
+                            )
+                        {
+                            hover_outline = Some((painter.clone(), row_rect, hover_stroke));
                         }
                         let response = table_row.response();
                         if response.clicked() {
@@ -1830,6 +1846,10 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                         });
                     });
                 });
+            // Keep the outline continuous over the table's column separators.
+            if let Some((painter, rect, stroke)) = hover_outline {
+                painter.rect_stroke(rect, CONTROL_RADIUS, stroke, egui::StrokeKind::Inside);
+            }
         });
     if let Some(column) = sort {
         if app.sort_column == column {
