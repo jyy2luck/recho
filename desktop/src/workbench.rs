@@ -1487,7 +1487,9 @@ fn capture_panes(app: &mut Recho, ui: &mut egui::Ui) {
                 details(app, ui);
             });
     }
-    egui::CentralPanel::no_frame().show(ui, |ui| capture_table(app, ui));
+    egui::CentralPanel::no_frame().show(ui, |ui| {
+        with_faster_vertical_scroll(ui, |ui| capture_table(app, ui));
+    });
 }
 
 fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {

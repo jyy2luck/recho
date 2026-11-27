@@ -42,6 +42,54 @@ fn semibold_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD_FAMILY.into()))
 }
 
+fn with_faster_vertical_scroll(ui: &mut egui::Ui, show: impl FnOnce(&mut egui::Ui)) {
+    const WHEEL_MULTIPLIER: f32 = 3.0;
+    ui.input_mut(|input| input.smooth_scroll_delta.y *= WHEEL_MULTIPLIER);
+    show(ui);
+    // Pass any unconsumed wheel input on at its original speed.
+    ui.input_mut(|input| input.smooth_scroll_delta.y /= WHEEL_MULTIPLIER);
+}
+
+#[cfg(test)]
+#[test]
+fn faster_vertical_scroll_keeps_horizontal_speed_and_passes_unused_input() {
+    let ctx = egui::Context::default();
+    for (delta, expected_offset, remaining) in [
+        (
+            egui::vec2(0.0, 40.0),
+            egui::Vec2::ZERO,
+            egui::vec2(0.0, 40.0),
+        ),
+        (
+            egui::vec2(-40.0, -40.0),
+            egui::vec2(40.0, 120.0),
+            egui::Vec2::ZERO,
+        ),
+    ] {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 240.0),
+                )),
+                events: vec![egui::Event::PointerMoved(egui::pos2(20.0, 20.0))],
+                ..Default::default()
+            },
+            |ui| {
+                ui.input_mut(|input| input.smooth_scroll_delta = delta);
+                with_faster_vertical_scroll(ui, |ui| {
+                    let output = egui::ScrollArea::both().show(ui, |ui| {
+                        ui.allocate_space(egui::vec2(800.0, 800.0));
+                    });
+                    assert_eq!(output.state.offset, expected_offset);
+                });
+                assert_eq!(ui.input(|input| input.smooth_scroll_delta()), remaining);
+            },
+        );
+        output.textures_delta.clear();
+    }
+}
+
 fn desktop_fonts() -> egui::FontDefinitions {
     use egui::FontFamily::{Monospace, Name, Proportional};
 

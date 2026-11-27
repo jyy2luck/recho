@@ -1,5 +1,5 @@
 use super::{Content, FormattedJson, TextRows, formatted_json, hex_row, show_raw_headers};
-use crate::{BodyFormat, files, theme::Theme};
+use crate::{BodyFormat, files, theme::Theme, with_faster_vertical_scroll};
 use eframe::egui::{self, RichText};
 use egui_extras::{Column, TableBuilder};
 use serde_json::Value;
@@ -168,7 +168,7 @@ impl View {
                 return;
             }
         }
-        match format {
+        with_faster_vertical_scroll(ui, |ui| match format {
             BodyFormat::Tree => match self.tree.as_mut().expect("tree format was prepared") {
                 Ok(tree) => tree.show(ui, &mut self.search),
                 Err(error) => {
@@ -206,7 +206,7 @@ impl View {
                     }
                 });
             }
-        }
+        });
     }
 }
 
