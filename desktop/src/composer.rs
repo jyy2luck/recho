@@ -20,6 +20,7 @@ use uuid::Uuid;
 mod operations;
 mod payload;
 mod protocol;
+mod script_share;
 use payload::{curl, payload, query_rows, query_url, request_from_curl};
 use protocol::{Protocol, Update};
 
@@ -254,6 +255,8 @@ pub(super) struct Composer {
     save_tab: Option<SaveTab>,
     rename_request: Option<RenameRequest>,
     transfer: Option<Transfer>,
+    script_share: crate::sharing::ShareUi<script_share::ScriptShare>,
+    script_share_target: Option<String>,
     environment_edit: Option<EnvironmentEdit>,
     new_folder: Option<String>,
     delete_collection_entry: Option<String>,
@@ -1215,7 +1218,39 @@ impl Composer {
                                 }
                                 "请求体" => body_editor(ui, request),
                                 "授权" => authorization(ui, request),
-                                "脚本" => scripts(ui, request),
+                                "脚本" => {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.menu_button("分享脚本", |ui| {
+                                            if self.script_share.export_menu(
+                                                ui,
+                                                "recho-script.json",
+                                                || script_share::encode(request),
+                                            ) {
+                                                ui.close();
+                                            }
+                                            if ui.button("导入分享脚本…").clicked() {
+                                                self.script_share.open("导入分享脚本");
+                                                self.script_share_target =
+                                                    Some(self.active.clone());
+                                                ui.close();
+                                            }
+                                        });
+                                        if let Some(notice) = self.script_share.notice() {
+                                            match notice {
+                                                Ok(message) => {
+                                                    ui.weak(message);
+                                                }
+                                                Err(error) => {
+                                                    ui.colored_label(
+                                                        ui.visuals().error_fg_color,
+                                                        error,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    });
+                                    scripts(ui, request)
+                                }
                                 "设置" => settings(ui, request, raw),
                                 _ => parameters(ui, request),
                             };
@@ -1499,6 +1534,24 @@ impl Composer {
         });
     }
     pub(super) fn show_dialogs(&mut self, ctx: &egui::Context, worker: &Worker) {
+        let target_name = self
+            .script_share_target
+            .as_deref()
+            .and_then(|target| self.request_index(target))
+            .and_then(|index| rows(self.document.as_ref()?, "requests").get(index))
+            .map(name);
+        if let Some(script) = self.script_share.poll(ctx, |text| {
+            let target = target_name.ok_or("要导入脚本的请求已关闭。")?;
+            script_share::preview(text, target)
+        }) && let Some(target) = self.script_share_target.take()
+            && let Some(request) = self.request_mut(&target)
+        {
+            script.apply(request);
+            self.mark_dirty();
+        }
+        if !self.script_share.is_open() {
+            self.script_share_target = None;
+        }
         if let Some(mut rename) = self.rename_request.take() {
             let colors = Theme::current_palette(ctx);
             let modal = Theme::modal(ctx, egui::Id::new("rename_request")).show(ctx, |ui| {

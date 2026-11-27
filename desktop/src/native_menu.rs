@@ -350,7 +350,9 @@ fn run(app: &mut Recho, ctx: &egui::Context, mtm: MainThreadMarker, action: Acti
                 app.mcp.back();
             } else if app.composer.active() {
                 app.composer.close_active(&app.worker);
-            } else if app.navigation == Navigation::Capture {
+            } else if let Some(scope) = app.history_scope.clone() {
+                app.close_history(&scope);
+            } else if matches!(app.navigation, Navigation::Capture | Navigation::History) {
                 app.close_capture_space(&app.spaces.group.clone());
             }
         }

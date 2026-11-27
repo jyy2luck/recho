@@ -63,6 +63,79 @@ pub struct Row {
     pub incognito: bool,
     pub list_matches: BTreeMap<String, bool>,
 }
+
+#[derive(Clone, Default)]
+pub struct QuickFilters {
+    pub protocol: String,
+    pub version: String,
+    pub content_type: String,
+    pub status: u16,
+}
+impl QuickFilters {
+    pub fn active(&self) -> bool {
+        !self.protocol.is_empty()
+            || !self.version.is_empty()
+            || !self.content_type.is_empty()
+            || self.status != 0
+    }
+
+    pub fn matches(&self, row: &Row) -> bool {
+        let protocol = match self.protocol.as_str() {
+            "" => true,
+            "HTTPS" => row.url.starts_with("https:"),
+            "HTTP" => row.url.starts_with("http:"),
+            "WebSocket" => row.websocket,
+            "SSE" => row.content_type == "text/event-stream",
+            _ => false,
+        };
+        let version = match self.version.as_str() {
+            "" => true,
+            "HTTP1" => row.protocol.starts_with("HTTP/1"),
+            "HTTP2" => row.protocol == "HTTP/2",
+            "HTTP3" => row.protocol == "HTTP/3",
+            _ => false,
+        };
+        protocol
+            && version
+            && (self.status == 0 || row.status / 100 == self.status)
+            && (self.content_type.is_empty() || quick_content_matches(row, &self.content_type))
+    }
+}
+
+fn quick_content_matches(row: &Row, filter: &str) -> bool {
+    let mime = row.content_type.as_str();
+    match filter {
+        "text/plain" => {
+            mime.starts_with("text/")
+                && ![
+                    "html",
+                    "xml",
+                    "javascript",
+                    "ecmascript",
+                    "css",
+                    "event-stream",
+                ]
+                .iter()
+                .any(|kind| mime.contains(kind))
+        }
+        "javascript" => {
+            mime.contains("javascript")
+                || mime.contains("ecmascript")
+                || (mime.is_empty()
+                    && url::Url::parse(&row.url)
+                        .is_ok_and(|url| url.path().to_ascii_lowercase().ends_with(".js")))
+        }
+        "video/" => mime.starts_with("audio/") || mime.starts_with("video/"),
+        "binary" => {
+            row.binary
+                || ["octet-stream", "pdf", "zip"]
+                    .iter()
+                    .any(|kind| mime.contains(kind))
+        }
+        _ => mime.contains(filter),
+    }
+}
+
 impl From<&crate::storage::Session> for Row {
     fn from(session: &crate::storage::Session) -> Self {
         Self {
@@ -346,6 +419,22 @@ impl DesktopEngine {
             .lock()
             .unwrap()
             .desktop_history_page(date, offset, query)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn filtered_desktop_history_page(
+        &self,
+        date: Option<&str>,
+        offset: usize,
+        conditions: &ConditionSet,
+        quick: &QuickFilters,
+    ) -> std::result::Result<HistoryPage, String> {
+        self.running
+            .engine
+            .history
+            .lock()
+            .unwrap()
+            .filtered_desktop_history_page(date, offset, "", conditions, quick)
             .map_err(|error| error.to_string())
     }
 

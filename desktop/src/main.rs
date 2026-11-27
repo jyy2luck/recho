@@ -14,6 +14,8 @@ mod native_menu;
 mod network_ui;
 mod platform;
 mod rules_ui;
+mod search_presets;
+mod sharing;
 mod theme;
 #[cfg(windows)]
 mod title_bar;
@@ -22,7 +24,9 @@ mod worker;
 
 use body::{Content, hex_row};
 use eframe::egui::{self, RichText};
-use recho_core::native::{Detail, HistoryDay, HistoryDeletePlan, HistoryDeletion, Phase, Row};
+use recho_core::native::{
+    ConditionSet, Detail, HistoryDay, HistoryDeletePlan, HistoryDeletion, Phase, QuickFilters, Row,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -203,38 +207,33 @@ enum Navigation {
     Tools,
 }
 
-fn quick_content_matches(row: &Row, filter: &str) -> bool {
-    let mime = row.content_type.as_str();
-    match filter {
-        "text/plain" => {
-            mime.starts_with("text/")
-                && ![
-                    "html",
-                    "xml",
-                    "javascript",
-                    "ecmascript",
-                    "css",
-                    "event-stream",
-                ]
-                .iter()
-                .any(|kind| mime.contains(kind))
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum HistoryScope {
+    All,
+    Day(String),
+}
+
+impl HistoryScope {
+    fn date(&self) -> Option<&str> {
+        match self {
+            Self::All => None,
+            Self::Day(date) => Some(date),
         }
-        "javascript" => {
-            mime.contains("javascript")
-                || mime.contains("ecmascript")
-                || (mime.is_empty()
-                    && url::Url::parse(&row.url)
-                        .is_ok_and(|url| url.path().to_ascii_lowercase().ends_with(".js")))
-        }
-        "video/" => mime.starts_with("audio/") || mime.starts_with("video/"),
-        "binary" => {
-            row.binary
-                || ["octet-stream", "pdf", "zip"]
-                    .iter()
-                    .any(|kind| mime.contains(kind))
-        }
-        _ => mime.contains(filter),
     }
+}
+
+#[derive(Default)]
+struct HistoryTab {
+    rows: Vec<Row>,
+    offset: usize,
+    load: Option<HistoryHandle>,
+    loaded: bool,
+    has_more: bool,
+    quick: QuickFilters,
+    conditions: ConditionSet,
+    filter_draft: ConditionSet,
+    filter_error: Option<String>,
+    preset: Option<String>,
 }
 
 struct Viewer {
@@ -286,6 +285,7 @@ struct Recho {
     workspace_ops: Vec<Value>,
     active_workspace_op: Option<(String, Result<Value, String>, Option<RequestHandle>)>,
     spaces: capture_spaces::Spaces,
+    search_presets: search_presets::SearchPresets,
     capture_filters: Vec<String>,
     highlight_editor: Option<(recho_core::native::ConditionSet, String)>,
     capture_positions: BTreeMap<String, usize>,
@@ -298,17 +298,13 @@ struct Recho {
     proxy_preferences_saving: bool,
     confirm_proxy_auto: bool,
     navigation: Navigation,
-    history_rows: Vec<Row>,
+    history_tabs: BTreeMap<HistoryScope, HistoryTab>,
+    history_scope: Option<HistoryScope>,
     history_days: Vec<HistoryDay>,
-    history_date: Option<String>,
     history_selected_dates: BTreeSet<String>,
     history_date_anchor: Option<String>,
     history_delete: Option<HistoryDeletePlan>,
     history_delete_pending: bool,
-    history_query: String,
-    history_offset: usize,
-    history_load: Option<HistoryHandle>,
-    history_loaded: bool,
     curl_copy: Option<(Row, DetailHandle)>,
     closing: bool,
     closing_proxy: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
@@ -324,10 +320,7 @@ struct Recho {
     application_icons: application_icons::ApplicationIcons,
     host_filter: String,
     app_filter: String,
-    protocol_filter: String,
-    version_filter: String,
-    status_filter: u16,
-    type_filter: String,
+    quick_filters: QuickFilters,
     sort_column: usize,
     ascending: bool,
     selected: Option<String>,
@@ -363,6 +356,9 @@ impl Recho {
             theme,
             theme_path,
             spaces: capture_spaces::Spaces::new(directory.join("desktop-captures.json")),
+            search_presets: search_presets::SearchPresets::new(
+                directory.join("desktop-search-presets.json"),
+            ),
             worker: Worker::start(directory, port, cc.egui_ctx.clone()),
             capture_positions: BTreeMap::new(),
             capture_filters: Vec::new(),
@@ -383,17 +379,13 @@ impl Recho {
             proxy_preferences_saving: false,
             confirm_proxy_auto: false,
             navigation: Navigation::Capture,
-            history_rows: Vec::new(),
+            history_tabs: BTreeMap::new(),
+            history_scope: None,
             history_days: Vec::new(),
-            history_date: None,
             history_selected_dates: BTreeSet::new(),
             history_date_anchor: None,
             history_delete: None,
             history_delete_pending: false,
-            history_query: String::new(),
-            history_offset: 0,
-            history_load: None,
-            history_loaded: false,
             curl_copy: None,
             closing: false,
             closing_proxy: None,
@@ -409,10 +401,7 @@ impl Recho {
             application_icons: application_icons::ApplicationIcons::default(),
             host_filter: String::new(),
             app_filter: String::new(),
-            protocol_filter: String::new(),
-            version_filter: String::new(),
-            status_filter: 0,
-            type_filter: String::new(),
+            quick_filters: QuickFilters::default(),
             sort_column: 0,
             ascending: true,
             selected: None,
@@ -502,8 +491,10 @@ impl Recho {
             workbench::visible_rows(
                 &self.rows,
                 &self.visible,
-                &self.history_rows,
-                self.navigation == Navigation::History,
+                self.history_scope
+                    .as_ref()
+                    .and_then(|scope| self.history_tabs.get(scope))
+                    .map(|tab| tab.rows.as_slice()),
             )
             .into_iter()
             .map(|row| row.id.as_str())
@@ -526,33 +517,62 @@ impl Recho {
         self.select_detail(detail);
     }
     fn active_rows(&self) -> &[Row] {
-        if self.navigation == Navigation::History {
-            &self.history_rows
-        } else {
-            &self.rows
-        }
+        self.active_history().map_or(&self.rows, |tab| &tab.rows)
     }
     fn navigate(&mut self, next: Navigation) {
         self.library.close();
-        let was_history = self.navigation == Navigation::History;
-        self.remember_capture();
-        if was_history != (next == Navigation::History) {
-            self.select(None);
-        }
         self.navigation = next;
-        if was_history && next != Navigation::History {
-            if let Some(space) = self.spaces.current() {
-                self.selection = space.selection.clone();
-                self.details_open = space.details_open;
-                self.select_detail(space.detail.clone());
-                self.rebuild_capture_rows();
-            }
-        }
         self.sidebar_visible = true;
-        if next == Navigation::History && self.ready {
-            self.composer.show_capture();
-            self.load_history(self.history_offset);
+        if next == Navigation::History {
+            self.open_history(self.history_scope.clone().unwrap_or(HistoryScope::All));
+        } else {
+            self.leave_history();
         }
+    }
+    fn active_history(&self) -> Option<&HistoryTab> {
+        self.history_tabs.get(self.history_scope.as_ref()?)
+    }
+    fn active_history_mut(&mut self) -> Option<&mut HistoryTab> {
+        self.history_tabs.get_mut(self.history_scope.as_ref()?)
+    }
+    fn open_history(&mut self, scope: HistoryScope) {
+        self.library.close();
+        self.navigation = Navigation::History;
+        self.composer.show_capture();
+        if self.history_scope.as_ref() == Some(&scope) {
+            return;
+        }
+        self.remember_capture();
+        if let Some(tab) = self.active_history_mut() {
+            tab.load = None;
+        }
+        self.select(None);
+        self.history_scope = Some(scope.clone());
+        let offset = self.history_tabs.entry(scope).or_default().offset;
+        if self.ready {
+            self.load_history(offset);
+        }
+    }
+    fn leave_history(&mut self) {
+        let Some(scope) = self.history_scope.take() else {
+            return;
+        };
+        if let Some(tab) = self.history_tabs.get_mut(&scope) {
+            tab.load = None;
+        }
+        self.select(None);
+        if let Some(space) = self.spaces.current() {
+            self.selection = space.selection.clone();
+            self.details_open = space.details_open;
+            self.select_detail(space.detail.clone());
+            self.rebuild_capture_rows();
+        }
+    }
+    fn close_history(&mut self, scope: &HistoryScope) {
+        if self.history_scope.as_ref() == Some(scope) {
+            self.leave_history();
+        }
+        self.history_tabs.remove(scope);
     }
     fn set_incognito(&mut self, enabled: bool) {
         match self.worker.request(
@@ -570,22 +590,25 @@ impl Recho {
         self.network.open(section);
     }
     fn load_history(&mut self, offset: usize) {
-        self.history_rows.clear();
-        self.history_loaded = false;
-        self.history_load = match self.worker.history(
-            offset,
-            self.history_query.trim().into(),
-            self.history_date.clone(),
-        ) {
-            Ok(request) => {
-                self.history_offset = offset;
-                Some(request)
-            }
-            Err(error) => {
-                self.error = Some(error);
-                None
-            }
+        let Some(scope) = self.history_scope.as_ref() else {
+            return;
         };
+        let tab = self.history_tabs.get_mut(scope).unwrap();
+        tab.load = None;
+        tab.rows.clear();
+        tab.loaded = false;
+        tab.has_more = false;
+        let date = scope.date().map(str::to_owned);
+        match self
+            .worker
+            .history(offset, date, tab.conditions.clone(), tab.quick.clone())
+        {
+            Ok(request) => {
+                tab.offset = offset;
+                tab.load = Some(request);
+            }
+            Err(error) => self.error = Some(error),
+        }
     }
 
     fn prepare_history_delete(&mut self, target: HistoryDeletion) {
@@ -658,19 +681,14 @@ impl Recho {
         }
     }
     fn edit_capture(&mut self, id: &str) {
-        let rows = if self.navigation == Navigation::History {
-            &self.history_rows
-        } else {
-            &self.rows
-        };
-        if let Some(row) = rows.iter().find(|row| row.id == id) {
+        if let Some(row) = self.active_rows().iter().find(|row| row.id == id).cloned() {
             let viewer = self.messages[0]
                 .viewer
                 .as_ref()
                 .filter(|viewer| viewer.detail.id == id);
             self.composer.open_capture(
                 &self.worker,
-                row,
+                &row,
                 viewer.map(|viewer| &viewer.detail),
                 viewer.map(|viewer| viewer.content.bytes()),
             );
@@ -778,21 +796,6 @@ impl Recho {
             .iter()
             .enumerate()
             .filter_map(|(index, row)| {
-                let protocol_match = self.protocol_filter.is_empty()
-                    || match self.protocol_filter.as_str() {
-                        "HTTPS" => row.url.starts_with("https:"),
-                        "HTTP" => row.url.starts_with("http:"),
-                        "WebSocket" => row.websocket,
-                        "SSE" => row.content_type == "text/event-stream",
-                        _ => false,
-                    };
-                let version_match = self.version_filter.is_empty()
-                    || match self.version_filter.as_str() {
-                        "HTTP1" => row.protocol.starts_with("HTTP/1"),
-                        "HTTP2" => row.protocol == "HTTP/2",
-                        "HTTP3" => row.protocol == "HTTP/3",
-                        _ => false,
-                    };
                 let mut applicable = self
                     .capture_filters
                     .iter()
@@ -806,14 +809,10 @@ impl Recho {
                         .matches
                         .as_ref()
                         .is_none_or(|ids| ids.contains(&row.id))
-                    && protocol_match
-                    && version_match
+                    && self.quick_filters.matches(row)
                     && (self.host_filter.is_empty() || row.host == self.host_filter)
-                    && (self.app_filter.is_empty() || row.application == self.app_filter)
-                    && (self.status_filter == 0 || row.status / 100 == self.status_filter)
-                    && (self.type_filter.is_empty()
-                        || quick_content_matches(row, &self.type_filter)))
-                .then_some(index)
+                    && (self.app_filter.is_empty() || row.application == self.app_filter))
+                    .then_some(index)
             })
             .collect();
         let rows = &self.rows;
@@ -845,6 +844,9 @@ impl Recho {
                 Ok(path) => {
                     self.ca_path = path;
                     self.ready = true;
+                    if let Some(offset) = self.active_history().map(|tab| tab.offset) {
+                        self.load_history(offset);
+                    }
                 }
                 Err(error) => self.error = Some(error),
             }
@@ -974,47 +976,51 @@ impl Recho {
         if inbox.history_delete_finished {
             self.history_delete_pending = false;
         }
-        if inbox.history_changed && self.navigation == Navigation::History {
+        if inbox.history_changed && self.history_scope.is_some() {
             self.load_history(0);
         }
-        if let Some(request) = &mut self.history_load {
+        if let Some(request) = self.active_history_mut().and_then(|tab| tab.load.as_mut()) {
             match request.try_recv() {
                 Ok(Ok(page)) => {
-                    if self.navigation == Navigation::History
-                        && self
-                            .selected
-                            .as_ref()
-                            .is_some_and(|id| !page.rows.iter().any(|row| &row.id == id))
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|id| !page.rows.iter().any(|row| &row.id == id))
                     {
                         self.select(None);
                     }
-                    if self.navigation == Navigation::History {
-                        self.selection
-                            .retain(|id| page.rows.iter().any(|row| &row.id == id));
-                    }
-                    self.history_rows = page.rows;
+                    self.selection
+                        .retain(|id| page.rows.iter().any(|row| &row.id == id));
+                    let tab = self.active_history_mut().unwrap();
+                    tab.rows = page.rows;
+                    tab.has_more = page.has_more;
+                    tab.loaded = true;
+                    tab.load = None;
                     self.history_days = page.days;
                     self.history_selected_dates
                         .retain(|date| self.history_days.iter().any(|day| &day.date == date));
-                    self.history_loaded = true;
-                    self.history_load = None;
                     if self
-                        .history_date
+                        .history_scope
                         .as_ref()
+                        .and_then(HistoryScope::date)
                         .is_some_and(|date| !self.history_days.iter().any(|day| &day.date == date))
                     {
-                        self.history_date = None;
-                        self.load_history(0);
+                        self.open_history(HistoryScope::All);
                     }
+                    self.history_tabs.retain(|scope, _| {
+                        scope
+                            .date()
+                            .is_none_or(|date| self.history_days.iter().any(|day| day.date == date))
+                    });
                 }
                 Ok(Err(error)) => {
                     self.error = Some(error);
-                    self.history_load = None;
+                    self.active_history_mut().unwrap().load = None;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                 Err(error) => {
                     self.error = Some(error.to_string());
-                    self.history_load = None;
+                    self.active_history_mut().unwrap().load = None;
                 }
             }
         }
@@ -1112,6 +1118,7 @@ impl eframe::App for Recho {
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         workbench::show(self, ui);
+        self.search_presets.dialogs(ui.ctx());
         if self.closing {
             let message = self.composer.save_error().map(str::to_owned);
             if let Some(message) = message {

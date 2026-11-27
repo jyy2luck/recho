@@ -232,6 +232,13 @@ impl ConditionSet {
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
+
+    pub(crate) fn history_matcher(&self) -> Result<impl Fn(&Session) -> bool + '_> {
+        let matchers = self.compile()?;
+        Ok(move |session: &Session| {
+            matchers.is_empty() || matches_set(&matchers, self.any, session, "无")
+        })
+    }
 }
 
 fn content_type(headers: &str) -> &str {

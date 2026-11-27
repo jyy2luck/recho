@@ -26,6 +26,7 @@ pub struct Space {
     pub descending: bool,
     pub sort: usize,
     pub conditions: ConditionSet,
+    pub preset: Option<String>,
     pub highlights: ConditionSet,
     pub highlight_color: Option<String>,
 }
@@ -127,7 +128,7 @@ impl Spaces {
 
 impl Recho {
     pub(super) fn remember_capture(&mut self) {
-        if self.navigation == crate::Navigation::History || self.spaces.group.is_empty() {
+        if self.history_scope.is_some() || self.spaces.group.is_empty() {
             return;
         }
         let Some(space) = self.spaces.items.get_mut(&self.spaces.group) else {
@@ -135,10 +136,12 @@ impl Recho {
         };
         space.application.clone_from(&self.app_filter);
         space.host.clone_from(&self.host_filter);
-        space.protocol.clone_from(&self.protocol_filter);
-        space.version.clone_from(&self.version_filter);
-        space.content_type.clone_from(&self.type_filter);
-        space.status = self.status_filter;
+        space.protocol.clone_from(&self.quick_filters.protocol);
+        space.version.clone_from(&self.quick_filters.version);
+        space
+            .content_type
+            .clone_from(&self.quick_filters.content_type);
+        space.status = self.quick_filters.status;
         space.sort = self.sort_column;
         space.descending = !self.ascending;
         space.selection = self
@@ -191,17 +194,17 @@ impl Recho {
             .clone();
         self.app_filter = state.application;
         self.host_filter = state.host;
-        (self.protocol_filter, self.version_filter) = match state.protocol.as_str() {
+        (self.quick_filters.protocol, self.quick_filters.version) = match state.protocol.as_str() {
             "HTTP1" | "HTTP2" | "HTTP3" => (String::new(), state.protocol),
             _ => (state.protocol, state.version),
         };
-        self.type_filter = state.content_type;
-        self.status_filter = state.status;
+        self.quick_filters.content_type = state.content_type;
+        self.quick_filters.status = state.status;
         self.sort_column = state.sort;
         self.ascending = !state.descending;
         self.spaces.filter_draft = state.conditions;
         self.spaces.filter_error = self.spaces.filter_draft.validate().err();
-        if self.navigation != crate::Navigation::History {
+        if self.history_scope.is_none() {
             self.select(None);
             self.details_open = state.details_open;
             self.selection = state.selection;
@@ -211,7 +214,7 @@ impl Recho {
 
     pub(super) fn rebuild_capture_rows(&mut self) {
         self.evaluate_conditions();
-        if self.navigation != crate::Navigation::History {
+        if self.history_scope.is_none() {
             self.selection
                 .retain(|id| self.capture_positions.contains_key(id));
             if self

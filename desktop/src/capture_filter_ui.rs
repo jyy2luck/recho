@@ -1,5 +1,6 @@
 use crate::{
     Recho,
+    search_presets::PresetAction,
     theme::{CONTROL_HEIGHT, Theme, control_row, input_text},
     workbench::icon,
 };
@@ -7,14 +8,80 @@ use eframe::egui;
 use egui_extras::{Size, StripBuilder};
 use recho_core::native::{Condition, ConditionSet, Field};
 
-const MAX_CONDITIONS: usize = 32;
+pub(super) const MAX_CONDITIONS: usize = 32;
+pub(super) const MAX_VALUE_CHARS: usize = 4096;
 const MODIFIER_WIDTH: f32 = 28.0;
 
+pub(super) fn presets(app: &mut Recho, ui: &mut egui::Ui) {
+    let (draft, error, selected) = match app.active_history() {
+        Some(history) => (
+            &history.filter_draft,
+            &history.filter_error,
+            history
+                .preset
+                .as_ref()
+                .filter(|name| app.search_presets.is_applied(name, &history.conditions)),
+        ),
+        None => (
+            &app.spaces.filter_draft,
+            &app.spaces.filter_error,
+            app.spaces.current().and_then(|space| {
+                space
+                    .preset
+                    .as_ref()
+                    .filter(|name| app.search_presets.is_applied(name, &space.conditions))
+            }),
+        ),
+    };
+    let selected = selected.cloned();
+    let can_save = error.is_none() && draft.active();
+    let can_clear =
+        draft.items.iter().any(|item| item != &Condition::default()) || draft.items.len() > 1;
+    match app
+        .search_presets
+        .menu(ui, selected.as_deref(), can_save, can_clear)
+    {
+        Some(PresetAction::Save) => {
+            let draft = app
+                .active_history()
+                .map_or(&app.spaces.filter_draft, |history| &history.filter_draft)
+                .clone();
+            app.search_presets.save_current(draft);
+        }
+        Some(PresetAction::Apply(preset)) => apply(app, preset.conditions, Some(preset.name)),
+        Some(PresetAction::Clear) => apply(app, ConditionSet::default(), None),
+        None => {}
+    }
+}
+
+fn apply(app: &mut Recho, draft: ConditionSet, preset: Option<String>) {
+    if let Some(history) = app.active_history_mut() {
+        history.filter_draft = draft;
+        history.filter_error = history.filter_draft.validate().err();
+        if history.filter_error.is_none() {
+            history.conditions.clone_from(&history.filter_draft);
+            history.preset = preset;
+            app.load_history(0);
+        }
+    } else if let Some(space) = app.spaces.items.get_mut(&app.spaces.group) {
+        app.spaces.filter_draft = draft;
+        app.spaces.filter_error = app.spaces.filter_draft.validate().err();
+        if app.spaces.filter_error.is_none() {
+            space.conditions.clone_from(&app.spaces.filter_draft);
+            space.preset = preset;
+            app.evaluate_conditions();
+        }
+    }
+}
+
 pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
-    let Some(space) = app.spaces.items.get_mut(&app.spaces.group) else {
+    let draft = if app.active_history().is_some() {
+        &mut app.active_history_mut().unwrap().filter_draft
+    } else if app.spaces.items.contains_key(&app.spaces.group) {
+        &mut app.spaces.filter_draft
+    } else {
         return;
     };
-    let draft = &mut app.spaces.filter_draft;
     if draft.items.is_empty() {
         draft.items.push(Condition::default());
     }
@@ -45,13 +112,13 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
         })
         .inner;
     if changed {
-        app.spaces.filter_error = draft.validate().err();
-        if app.spaces.filter_error.is_none() {
-            space.conditions.clone_from(draft);
-            app.evaluate_conditions();
-        }
+        let draft = std::mem::take(draft);
+        apply(app, draft, None);
     }
-    if let Some(error) = &app.spaces.filter_error {
+    let error = app
+        .active_history()
+        .map_or(&app.spaces.filter_error, |history| &history.filter_error);
+    if let Some(error) = error {
         let summary = error.lines().last().unwrap_or(error);
         ui.colored_label(colors.red, format!("筛选条件无效：{summary}"))
             .on_hover_text(error);
@@ -269,7 +336,8 @@ fn condition_value(parent: &mut egui::Ui, item: &mut Condition) -> bool {
         let supports_deep = item.field.supports_deep();
         let modifiers = if supports_deep { 2.0 } else { 1.0 };
         let text_width = width - modifiers * (MODIFIER_WIDTH + 4.0) - 4.0;
-        let value = ui.add(input_text(&mut item.value, "搜索内容", text_width).char_limit(4096));
+        let value =
+            ui.add(input_text(&mut item.value, "搜索内容", text_width).char_limit(MAX_VALUE_CHARS));
         ui.ctx()
             .accesskit_node_builder(value.id, |node| node.set_label("搜索内容"));
         frame.frame.stroke = colors.input_stroke(&value);

@@ -106,6 +106,7 @@ pub(super) struct RuleEditor {
     actions: [ActionEditor; 3],
     tab: usize,
     advanced: Option<String>,
+    relinking_import: bool,
     dirty: bool,
     cancel: bool,
 }
@@ -142,9 +143,23 @@ impl RuleEditor {
             excludes,
             tab,
             advanced: None,
+            relinking_import: false,
             dirty: false,
             cancel: false,
         }
+    }
+
+    pub(super) fn relink_import(value: Value) -> Self {
+        let mut editor = Self::new(value, None);
+        editor.relinking_import = true;
+        if let Some(index) = editor
+            .actions
+            .iter()
+            .position(|action| action.value.get("bodyFile").is_some())
+        {
+            editor.tab = index;
+        }
+        editor
     }
 
     pub fn poll(&mut self) {
@@ -245,6 +260,9 @@ impl RuleEditor {
                         }
                     });
                 });
+            if self.relinking_import {
+                ui.label("为正文文件选择本机路径后保存。导入的规则默认停用。");
+            }
             if let Some(error) = self.error.as_deref().or(state.source_error) {
                 ui.colored_label(ui.visuals().error_fg_color, error);
             }
@@ -296,8 +314,10 @@ impl RuleEditor {
                 match self.read_advanced() {
                     Ok(value) => {
                         let dirty = self.dirty;
+                        let relinking_import = self.relinking_import;
                         *self = Self::new(value, self.baseline.take());
                         self.dirty = dirty;
+                        self.relinking_import = relinking_import;
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -312,7 +332,12 @@ impl RuleEditor {
         }
         if save {
             match self.read_advanced() {
-                Ok(value) => *result = Some(value),
+                Ok(mut value) => {
+                    if self.relinking_import {
+                        value["enabled"] = json!(false);
+                    }
+                    *result = Some(value);
+                }
                 Err(error) => self.error = Some(error),
             }
         }
@@ -329,7 +354,13 @@ impl RuleEditor {
         self.dirty |= string_field(ui, &mut self.draft, "name", "名称", None);
         self.dirty |= string_field(ui, &mut self.draft, "folder", "文件夹", None);
         let mut enabled = self.draft["enabled"] != false;
-        if ui.checkbox(&mut enabled, "启用规则").changed() {
+        if ui
+            .add_enabled(
+                !self.relinking_import,
+                egui::Checkbox::new(&mut enabled, "启用规则"),
+            )
+            .changed()
+        {
             self.draft["enabled"] = json!(enabled);
             self.dirty = true;
         }
@@ -358,6 +389,12 @@ impl RuleEditor {
             let phase = ["request", "response", "mock"][self.tab];
             let action = &mut self.actions[self.tab];
             self.dirty |= action.show(ui, worker, phase);
+            if self.relinking_import
+                && action.value.get("bodyFile").is_some()
+                && Action::of(&action.value) != Action::Replace
+            {
+                self.dirty |= action.body_file(ui);
+            }
         });
     }
 }
@@ -551,22 +588,25 @@ impl ActionEditor {
             "body" | "bodyBase64" => {
                 changed |= multiline_field(ui, &mut self.value, body_kind, "", 6);
             }
-            "bodyFile" => {
-                changed |= string_field(
-                    ui,
-                    &mut self.value,
-                    "bodyFile",
-                    "文件路径",
-                    Some("绝对路径"),
-                );
-                if ui
-                    .add_enabled(self.file_pick.is_none(), egui::Button::new("选择文件"))
-                    .clicked()
-                {
-                    self.file_pick = Some(crate::files::pick("", false, ui.ctx()));
-                }
-            }
+            "bodyFile" => changed |= self.body_file(ui),
             _ => {}
+        }
+        changed
+    }
+
+    fn body_file(&mut self, ui: &mut egui::Ui) -> bool {
+        let changed = string_field(
+            ui,
+            &mut self.value,
+            "bodyFile",
+            "文件路径",
+            Some("绝对路径"),
+        );
+        if ui
+            .add_enabled(self.file_pick.is_none(), egui::Button::new("选择文件"))
+            .clicked()
+        {
+            self.file_pick = Some(crate::files::pick("", false, ui.ctx()));
         }
         changed
     }

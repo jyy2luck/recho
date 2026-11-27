@@ -1,7 +1,7 @@
 use super::*;
 use crate::certificate_ui::Page as CertificatePage;
 use crate::theme::{
-    CONTROL_HEIGHT, Theme, control_row, dialog_footer, dialog_header, paint_workbench_tab,
+    CONTROL_HEIGHT, Palette, Theme, control_row, dialog_footer, dialog_header, paint_workbench_tab,
 };
 use egui_extras::{Column, TableBuilder};
 
@@ -585,8 +585,8 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 }
                 ui.label(format!(
                     "共 {} 项 · 已选择 {}",
-                    if app.navigation == Navigation::History {
-                        app.history_rows.len()
+                    if let Some(tab) = app.active_history() {
+                        tab.rows.len()
                     } else {
                         app.visible.len()
                     },
@@ -675,6 +675,7 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                     ui.horizontal(|ui| {
                         capture_tabs(app, ui);
                         app.composer.show_tabs(ui, &app.worker);
+                        history_tabs(app, ui);
                         let add = ui.add_enabled(
                             app.ready,
                             egui::Button::new("＋").min_size(egui::Vec2::splat(CONTROL_HEIGHT)),
@@ -746,13 +747,15 @@ pub(super) fn show(app: &mut Recho, ui: &mut egui::Ui) {
                 app.composer.show(ui, &app.worker, app.port);
                 return;
             }
-            if app.navigation == Navigation::History {
-                history(app, ui);
-                return;
-            }
-            filters(app, ui);
-            crate::capture_filter_ui::show(app, ui);
-            capture_panes(app, ui);
+            ui.push_id(app.history_scope.clone(), |ui| {
+                filters(app, ui);
+                crate::capture_filter_ui::show(app, ui);
+                if app.active_history().is_some() {
+                    history(app, ui);
+                } else {
+                    capture_panes(app, ui);
+                }
+            });
         });
     dialogs(app, ui.ctx());
     app.composer.show_dialogs(ui.ctx(), &app.worker);
@@ -1084,105 +1087,83 @@ fn proxy_bar(app: &mut Recho, ui: &mut egui::Ui) {
 }
 
 fn filters(app: &mut Recho, ui: &mut egui::Ui) {
+    let history = app.history_scope.is_some();
     let mut changed = false;
-    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-    let layout = egui::Layout::right_to_left(egui::Align::Center);
-    ui.allocate_ui_with_layout(size, layout, |ui| {
-        if ui
-            .add(egui::Button::selectable(app.details_open, icon("\u{e949}")))
-            .on_hover_text("显示或关闭详情；双击记录打开")
-            .clicked()
-        {
-            app.details_open = !app.details_open;
-            if app.details_open {
-                app.load_details();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().button_padding.x = 6.0;
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let quick = match &app.history_scope {
+            Some(scope) => &mut app.history_tabs.get_mut(scope).unwrap().quick,
+            None => &mut app.quick_filters,
+        };
+        if ui.selectable_label(!quick.active(), "All").clicked() {
+            *quick = QuickFilters::default();
+            changed = true;
+        }
+        ui.separator();
+        for (filter, choices) in [
+            (
+                &mut quick.protocol,
+                &["HTTP", "HTTPS", "WebSocket", "SSE"][..],
+            ),
+            (&mut quick.version, &["HTTP1", "HTTP2", "HTTP3"][..]),
+        ] {
+            for &choice in choices {
+                if ui.selectable_label(*filter == choice, choice).clicked() {
+                    *filter = if *filter == choice {
+                        String::new()
+                    } else {
+                        choice.into()
+                    };
+                    changed = true;
+                }
+            }
+            ui.separator();
+        }
+        for (label, content_type) in [
+            ("JSON", "json"),
+            ("XML", "xml"),
+            ("文本", "text/plain"),
+            ("HTML", "html"),
+            ("JS", "javascript"),
+            ("图片", "image/"),
+            ("媒体", "video/"),
+            ("二进制", "binary"),
+        ] {
+            if ui
+                .selectable_label(quick.content_type == content_type, label)
+                .clicked()
+            {
+                quick.content_type = if quick.content_type == content_type {
+                    String::new()
+                } else {
+                    content_type.into()
+                };
+                changed = true;
             }
         }
-        if !app.capture_filters.is_empty() {
+        ui.separator();
+        for status in 1..=5 {
+            if ui
+                .selectable_label(quick.status == status, format!("{status}xx"))
+                .clicked()
+            {
+                quick.status = if quick.status == status { 0 } else { status };
+                changed = true;
+            }
+        }
+        crate::capture_filter_ui::presets(app, ui);
+        if !history && !app.capture_filters.is_empty() {
             ui.weak(format!("MCP 筛选 ({})", app.capture_filters.len()));
         }
-        egui::ScrollArea::horizontal()
-            .id_salt("quick_filters")
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    if ui
-                        .selectable_label(
-                            app.protocol_filter.is_empty()
-                                && app.version_filter.is_empty()
-                                && app.type_filter.is_empty()
-                                && app.status_filter == 0,
-                            "All",
-                        )
-                        .clicked()
-                    {
-                        app.protocol_filter.clear();
-                        app.version_filter.clear();
-                        app.type_filter.clear();
-                        app.status_filter = 0;
-                        changed = true;
-                    }
-                    ui.separator();
-                    for (filter, choices) in [
-                        (
-                            &mut app.protocol_filter,
-                            &["HTTP", "HTTPS", "WebSocket", "SSE"][..],
-                        ),
-                        (&mut app.version_filter, &["HTTP1", "HTTP2", "HTTP3"][..]),
-                    ] {
-                        for &choice in choices {
-                            if ui.selectable_label(*filter == choice, choice).clicked() {
-                                *filter = if *filter == choice {
-                                    String::new()
-                                } else {
-                                    choice.into()
-                                };
-                                changed = true;
-                            }
-                        }
-                        ui.separator();
-                    }
-                    for (label, content_type) in [
-                        ("JSON", "json"),
-                        ("XML", "xml"),
-                        ("文本", "text/plain"),
-                        ("HTML", "html"),
-                        ("JS", "javascript"),
-                        ("图片", "image/"),
-                        ("媒体", "video/"),
-                        ("二进制", "binary"),
-                    ] {
-                        if ui
-                            .selectable_label(app.type_filter == content_type, label)
-                            .clicked()
-                        {
-                            app.type_filter = if app.type_filter == content_type {
-                                String::new()
-                            } else {
-                                content_type.into()
-                            };
-                            changed = true;
-                        }
-                    }
-                    ui.separator();
-                    for status in 1..=5 {
-                        if ui
-                            .selectable_label(app.status_filter == status, format!("{status}xx"))
-                            .clicked()
-                        {
-                            app.status_filter = if app.status_filter == status {
-                                0
-                            } else {
-                                status
-                            };
-                            changed = true;
-                        }
-                    }
-                });
-            });
     });
     if changed {
-        app.refilter();
+        if history {
+            app.select(None);
+            app.load_history(0);
+        } else {
+            app.refilter();
+        }
     }
 }
 
@@ -1211,7 +1192,7 @@ fn capture_tabs(app: &mut Recho, ui: &mut egui::Ui) {
     for id in groups {
         let space = app.spaces.items.get_mut(&id).unwrap();
         let current = id == app.spaces.group;
-        let selected = current && !app.composer.active() && app.navigation != Navigation::History;
+        let selected = current && !app.composer.active() && app.history_scope.is_none();
         let label = if current {
             format!("◉  {} ({})", space.name, app.rows.len())
         } else {
@@ -1287,6 +1268,48 @@ fn select_all_pressed(input: &mut egui::InputState) -> bool {
         || input.consume_key(egui::Modifiers::CTRL, egui::Key::A)
 }
 
+fn history_tabs(app: &mut Recho, ui: &mut egui::Ui) {
+    let mut next = None;
+    let mut remove = None;
+    for scope in app.history_tabs.keys() {
+        ui.push_id(scope, |ui| {
+            let label = scope.date().unwrap_or("全部历史");
+            let selected = !app.composer.active() && app.history_scope.as_ref() == Some(scope);
+            let mut frame = egui::Frame::new().begin(ui);
+            let response = frame.content_ui.add(
+                egui::Button::selectable(selected, label)
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE)
+                    .min_size(egui::vec2(100.0, CONTROL_HEIGHT))
+                    .wrap_mode(egui::TextWrapMode::Extend),
+            );
+            if response.clicked() {
+                next = Some(scope.clone());
+            }
+            let close = frame.content_ui.add(
+                egui::Button::new("×")
+                    .min_size(egui::vec2(26.0, CONTROL_HEIGHT))
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(egui::Stroke::NONE),
+            );
+            close.ctx.accesskit_node_builder(close.id, |node| {
+                node.set_label(format!("关闭 {label}"));
+            });
+            let close = close.on_hover_text("关闭历史标签");
+            if close.clicked() {
+                remove = Some(scope.clone());
+            }
+            paint_workbench_tab(ui, frame, selected, &response, Some(&close));
+        });
+    }
+    if let Some(scope) = remove {
+        app.close_history(&scope);
+    }
+    if let Some(scope) = next {
+        app.open_history(scope);
+    }
+}
+
 fn history_sidebar(app: &mut Recho, ui: &mut egui::Ui) {
     let focus_id = ui.make_persistent_id("history_dates_focus");
     ui.interact(
@@ -1324,15 +1347,16 @@ fn history_sidebar(app: &mut Recho, ui: &mut egui::Ui) {
             }
         });
     });
-    let mut date = app.history_date.clone();
+    let mut open = None;
     let mut delete_day = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            let all_selected = date.is_none() && app.history_selected_dates.is_empty();
+            let all_selected = app.history_scope == Some(HistoryScope::All)
+                && app.history_selected_dates.is_empty();
             if sidebar_row(ui, "全部日期", Some(all_selected)).clicked() {
                 ui.memory_mut(|memory| memory.request_focus(focus_id));
-                date = None;
+                open = Some(HistoryScope::All);
                 app.history_selected_dates.clear();
                 app.history_date_anchor = None;
             }
@@ -1383,7 +1407,7 @@ fn history_sidebar(app: &mut Recho, ui: &mut egui::Ui) {
                                     &order,
                                 );
                                 if !modifiers.command && !modifiers.ctrl && !modifiers.shift {
-                                    date = Some(day.date.clone());
+                                    open = Some(HistoryScope::Day(day.date.clone()));
                                 }
                             }
                         },
@@ -1394,28 +1418,15 @@ fn history_sidebar(app: &mut Recho, ui: &mut egui::Ui) {
     if let Some(day) = delete_day {
         app.prepare_history_delete(HistoryDeletion::Dates(vec![day]));
     }
-    if date != app.history_date {
-        app.history_date = date;
-        app.select(None);
-        app.load_history(0);
+    if let Some(scope) = open {
+        app.open_history(scope);
     }
 }
 
 fn history(app: &mut Recho, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.strong("历史");
-        let search_width = (ui.available_width() - 235.0).clamp(75.0, 260.0);
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut app.history_query)
-                    .hint_text("搜索历史")
-                    .desired_width(search_width),
-            )
-            .changed()
-        {
-            app.select(None);
-            app.load_history(0);
-        }
+    let tab = app.active_history().unwrap();
+    let (offset, has_more, loading) = (tab.offset, tab.has_more, tab.load.is_some());
+    ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
                 !app.selection.is_empty()
@@ -1430,29 +1441,30 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
             ));
         }
         if ui.button("刷新").clicked() {
-            app.load_history(app.history_offset);
+            app.load_history(offset);
         }
         if ui
-            .add_enabled(app.history_offset > 0, egui::Button::new("上一页"))
+            .add_enabled(!loading && offset > 0, egui::Button::new("上一页"))
             .clicked()
         {
             app.select(None);
-            app.load_history(app.history_offset.saturating_sub(100));
+            app.load_history(offset.saturating_sub(100));
         }
         if ui
-            .add_enabled(app.history_rows.len() == 100, egui::Button::new("下一页"))
+            .add_enabled(!loading && has_more, egui::Button::new("下一页"))
             .clicked()
         {
             app.select(None);
-            app.load_history(app.history_offset + 100);
+            app.load_history(offset + 100);
         }
-        ui.weak(format!("第 {} 页", app.history_offset / 100 + 1));
+        ui.weak(format!("第 {} 页", offset / 100 + 1));
     });
-    if app.history_load.is_some() {
+    let tab = app.active_history().unwrap();
+    if tab.load.is_some() {
         ui.spinner();
         return;
-    } else if app.history_rows.is_empty() {
-        ui.label(if app.history_loaded {
+    } else if tab.rows.is_empty() {
+        ui.label(if tab.loaded {
             "没有匹配的历史记录"
         } else {
             "历史尚未加载"
@@ -1465,11 +1477,7 @@ fn history(app: &mut Recho, ui: &mut egui::Ui) {
 
 fn capture_panes(app: &mut Recho, ui: &mut egui::Ui) {
     if app.details_open && app.selected.is_some() {
-        let panel_id = if app.navigation == Navigation::History {
-            "history_detail"
-        } else {
-            "details"
-        };
+        let panel_id = egui::Id::new(("details", &app.history_scope));
         egui::Panel::right(panel_id)
             .default_size((ui.available_width() * 0.5).max(360.0))
             .min_size(330.0)
@@ -1484,8 +1492,8 @@ fn capture_panes(app: &mut Recho, ui: &mut egui::Ui) {
 
 fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     let colors = app.theme.palette(ui.ctx());
-    let history = app.navigation == Navigation::History;
-    let all_history_dates = history && app.history_date.is_none();
+    let history = app.history_scope.is_some();
+    let all_history_dates = app.history_scope == Some(HistoryScope::All);
     let focus_id = ui.make_persistent_id(("capture_focus", history));
     if !history
         && ui.memory(|memory| memory.focused().is_none() || memory.has_focus(focus_id))
@@ -1493,7 +1501,7 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     {
         app.clear_capture_space();
     }
-    if history && app.history_rows.is_empty() {
+    if history && app.active_rows().is_empty() {
         return;
     }
     if !history && app.rows.is_empty() {
@@ -1528,9 +1536,9 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     let mut scroll_to = None;
     if ui.memory(|memory| memory.has_focus(focus_id)) {
         if history && app.history_delete.is_none() && ui.input_mut(select_all_pressed) {
-            app.selection = app.history_rows.iter().map(|row| row.id.clone()).collect();
+            app.selection = app.active_rows().iter().map(|row| row.id.clone()).collect();
             if app.selection_anchor.is_none() {
-                app.selection_anchor = app.history_rows.first().map(|row| row.id.clone());
+                app.selection_anchor = app.active_rows().first().map(|row| row.id.clone());
             }
         }
         let movement = ui.input_mut(|input| {
@@ -1538,7 +1546,11 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
                 - input.count_and_consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) as isize
         });
         if movement != 0 {
-            let ids = visible_rows(&app.rows, &app.visible, &app.history_rows, history);
+            let ids = visible_rows(
+                &app.rows,
+                &app.visible,
+                app.active_history().map(|tab| tab.rows.as_slice()),
+            );
             let current = app
                 .selected
                 .as_ref()
@@ -1576,7 +1588,12 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
     let mut keep = None;
     let mut rule = None;
     let modifiers = ui.input(|input| input.modifiers);
-    let rows = visible_rows(&app.rows, &app.visible, &app.history_rows, history);
+    let archived = app
+        .history_scope
+        .as_ref()
+        .and_then(|scope| app.history_tabs.get(scope))
+        .map(|tab| tab.rows.as_slice());
+    let rows = visible_rows(&app.rows, &app.visible, archived);
     let application_icons = &mut app.application_icons;
     egui::ScrollArea::horizontal()
         .id_salt(("table_horizontal", history))
@@ -1841,10 +1858,9 @@ fn capture_table(app: &mut Recho, ui: &mut egui::Ui) {
         app.choose_har(ui.ctx(), true);
     }
     if let Some((compare, now)) = keep {
-        let rows = if history {
-            &app.history_rows
-        } else {
-            &app.rows
+        let rows = match &app.history_scope {
+            Some(scope) => &app.history_tabs[scope].rows,
+            None => &app.rows,
         };
         let rows = rows
             .iter()
@@ -1866,9 +1882,9 @@ fn capture_table_builder(
     let (table_id, id_width) = if all_history_dates {
         ("all_history_dates", 132.0)
     } else {
-        ("captures", 48.0)
+        ("captures", 60.0)
     };
-    let mut widths = [id_width, 36.0, 80.0, 230.0, 108.0, 65.0, 112.0, 75.0, 75.0];
+    let mut widths = [id_width, 60.0, 80.0, 230.0, 108.0, 65.0, 112.0, 75.0, 75.0];
     let spacing = ui.spacing();
     let default_table_width = widths.iter().sum::<f32>()
         + spacing.item_spacing.x * (widths.len() - 1) as f32
@@ -1905,10 +1921,9 @@ fn capture_cell(ui: &mut egui::Ui, column: usize, contents: impl FnOnce(&mut egu
 pub(super) fn visible_rows<'a>(
     rows: &'a [Row],
     visible: &[usize],
-    archived: &'a [Row],
-    history: bool,
+    archived: Option<&'a [Row]>,
 ) -> Vec<&'a Row> {
-    if history {
+    if let Some(archived) = archived {
         archived.iter().collect()
     } else {
         visible.iter().map(|&index| &rows[index]).collect()
@@ -2117,13 +2132,88 @@ fn details(app: &mut Recho, ui: &mut egui::Ui) {
     ui.add_space(response_gap);
     message(app, ui, 1);
 }
+
+fn url_layout(url: &str, font: egui::FontId, colors: Palette) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let mut append = |text: &str, color| {
+        if !text.is_empty() {
+            job.append(text, 0.0, egui::TextFormat::simple(font.clone(), color));
+        }
+    };
+
+    let (address, fragment) = url
+        .split_once('#')
+        .map_or((url, None), |(address, fragment)| (address, Some(fragment)));
+    let (address, query) = address
+        .split_once('?')
+        .map_or((address, None), |(address, query)| (address, Some(query)));
+    let address = match address.split_once("://") {
+        Some((scheme, address)) if !scheme.is_empty() && !scheme.contains('/') => {
+            append(scheme, colors.green);
+            append("://", colors.text);
+            address
+        }
+        _ => address,
+    };
+    let (host, path) = address.split_at(address.find('/').unwrap_or(address.len()));
+    append(host, colors.accent);
+    append(path, colors.key);
+
+    if let Some(query) = query {
+        append("?", colors.text);
+        for (index, param) in query.split('&').enumerate() {
+            if index > 0 {
+                append("&", colors.text);
+            }
+            if let Some((key, value)) = param.split_once('=') {
+                append(key, colors.red);
+                append("=", colors.text);
+                append(value, colors.warning);
+            } else {
+                append(param, colors.red);
+            }
+        }
+    }
+    if let Some(fragment) = fragment {
+        append("#", colors.text);
+        append(fragment, colors.muted);
+    }
+    job
+}
+
+#[cfg(test)]
+#[test]
+fn url_layout_preserves_encoded_and_repeated_parameters() {
+    use egui::epaint::text::ByteRangeExt;
+
+    let colors = Theme::default().palette(&egui::Context::default());
+    let url = "https://[::1]:8080/订单?key=%2F&key=a=b&&flag&empty=#原样?";
+    let job = url_layout(url, egui::FontId::default(), colors);
+    assert_eq!(job.text, url);
+    let sections: Vec<_> = job
+        .sections
+        .iter()
+        .map(|section| (section.byte_range.slice(&job.text), section.format.color))
+        .collect();
+    for (text, color) in [
+        ("https", colors.green),
+        ("[::1]:8080", colors.accent),
+        ("/订单", colors.key),
+        ("key", colors.red),
+        ("%2F", colors.warning),
+        ("a=b", colors.warning),
+        ("flag", colors.red),
+    ] {
+        assert!(sections.contains(&(text, color)));
+    }
+}
+
 fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
     let colors = app.theme.palette(ui.ctx());
     let request = index == 0;
-    let rows = if app.navigation == Navigation::History {
-        &app.history_rows
-    } else {
-        &app.rows
+    let rows = match &app.history_scope {
+        Some(scope) => &app.history_tabs[scope].rows,
+        None => &app.rows,
     };
     let Some(row) = rows
         .iter()
@@ -2199,6 +2289,41 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         );
     });
     ui.separator();
+    if panel.tab == MessageTab::Overview {
+        egui::ScrollArea::vertical()
+            .id_salt("request_overview")
+            .min_scrolled_height(0.0)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if icon_button(ui, "\u{e14d}", "复制 URL", !row.url.is_empty()).clicked() {
+                        ui.ctx().copy_text(row.url.clone());
+                    }
+                    ui.vertical(|ui| {
+                        ui.take_available_width();
+                        let font = egui::TextStyle::Body.resolve(ui.style());
+                        ui.add(egui::Label::new(url_layout(&row.url, font, colors)).wrap());
+                    });
+                });
+                if let Some(error) = &row.error {
+                    ui.colored_label(colors.red, error);
+                }
+                ui.separator();
+                for (key, value) in [
+                    ("方法", row.method.as_str()),
+                    ("协议", row.protocol.as_str()),
+                    ("应用程序", row.application.as_str()),
+                    ("服务器 IP", row.server_ip.as_str()),
+                    ("状态", &row.status.to_string()),
+                ] {
+                    ui.horizontal(|ui| {
+                        ui.add_sized([85.0, 20.0], egui::Label::new(RichText::new(key).weak()));
+                        ui.add(egui::Label::new(value).wrap());
+                    });
+                }
+            });
+        return;
+    }
     if request {
         ui.add(egui::Label::new(&row.url).truncate());
     } else {
@@ -2212,28 +2337,6 @@ fn message(app: &mut Recho, ui: &mut egui::Ui, index: usize) {
         ui.colored_label(colors.red, error);
     }
     ui.separator();
-    if panel.tab == MessageTab::Overview {
-        egui::ScrollArea::vertical()
-            .id_salt("request_overview")
-            .min_scrolled_height(0.0)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (key, value) in [
-                    ("方法", row.method.as_str()),
-                    ("协议", row.protocol.as_str()),
-                    ("应用程序", row.application.as_str()),
-                    ("服务器 IP", row.server_ip.as_str()),
-                    ("状态", &row.status.to_string()),
-                    ("URL", row.url.as_str()),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.add_sized([85.0, 20.0], egui::Label::new(RichText::new(key).weak()));
-                        ui.add(egui::Label::new(value).wrap());
-                    });
-                }
-            });
-        return;
-    }
     let Some(viewer) = &mut panel.viewer else {
         ui.label("正在读取归档…");
         return;

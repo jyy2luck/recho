@@ -1,5 +1,5 @@
 use super::*;
-use crate::native::Row;
+use crate::native::{ConditionSet, QuickFilters, Row};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, io::Read};
@@ -24,6 +24,7 @@ pub struct HistoryDay {
 pub struct HistoryPage {
     pub rows: Vec<Row>,
     pub days: Vec<HistoryDay>,
+    pub has_more: bool,
 }
 
 pub enum HistoryDeletion {
@@ -381,6 +382,23 @@ impl History {
         offset: usize,
         query: &str,
     ) -> Result<HistoryPage> {
+        self.filtered_desktop_history_page(
+            date,
+            offset,
+            query,
+            &ConditionSet::default(),
+            &QuickFilters::default(),
+        )
+    }
+
+    pub(crate) fn filtered_desktop_history_page(
+        &self,
+        date: Option<&str>,
+        offset: usize,
+        query: &str,
+        conditions: &ConditionSet,
+        quick: &QuickFilters,
+    ) -> Result<HistoryPage> {
         let days = self
             .db
             .prepare(&format!(
@@ -395,26 +413,55 @@ impl History {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?;
+        let active_filter = conditions.active() || quick.active();
+        let matches = conditions.history_matcher()?;
         let mut statement = self.db.prepare(&format!(
             "SELECT document, {HISTORY_DATE}, history_ids.number FROM sessions
              LEFT JOIN history_ids ON sessions.id = history_ids.session_id
              WHERE (?1 IS NULL OR {HISTORY_DATE} = ?1)
              AND (?2 = '' OR instr(lower(document), lower(?2)) > 0)
-             ORDER BY started_at DESC, sessions.rowid DESC LIMIT 100 OFFSET ?3",
+             ORDER BY started_at DESC, sessions.rowid DESC LIMIT ?3 OFFSET ?4",
         ))?;
-        let mut result = statement.query(params![date, query, offset as i64])?;
+        let (limit, sql_offset, mut skip) = if active_filter {
+            (-1, 0, offset)
+        } else {
+            (101, offset as i64, 0)
+        };
+        let mut result = statement.query(params![date, query, limit, sql_offset])?;
         let mut rows = Vec::new();
         while let Some(record) = result.next()? {
             let document = record
                 .get_ref(0)?
                 .as_str()
                 .map_err(crate::wire::Error::bad)?;
-            let mut row = Row::from(&serde_json::from_str::<Session>(document)?);
+            let session = serde_json::from_str::<Session>(document)?;
+            if !matches(&session) {
+                continue;
+            }
+            let mut row = Row::from(&session);
+            if !quick.matches(&row) {
+                continue;
+            }
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if rows.len() == 100 {
+                return Ok(HistoryPage {
+                    rows,
+                    days,
+                    has_more: true,
+                });
+            }
             row.history_date = record.get(1)?;
             row.history_id = record.get(2)?;
             rows.push(row);
         }
-        Ok(HistoryPage { rows, days })
+        Ok(HistoryPage {
+            rows,
+            days,
+            has_more: false,
+        })
     }
 
     pub(crate) fn get_by_history_id(&self, date: &str, id: u64) -> Result<Option<Session>> {
@@ -539,6 +586,57 @@ mod tests {
         let page = history.desktop_history_page(None, 0, "/next-day").unwrap();
         assert_ne!(page.rows[0].history_date.as_ref(), Some(date));
         assert_eq!(page.rows[0].history_id, Some(1));
+    }
+
+    #[test]
+    fn history_filters_conditions_and_quick_filters_before_pagination() {
+        use crate::native::{Condition, Field};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = History::open(dir.path(), 200).unwrap();
+        let records = (0..205).map(|index| {
+            let mut session = capture(
+                &format!("entry-{index}"),
+                "default",
+                "2026-11-25T12:00:00.000Z",
+            );
+            if index < 103 {
+                session.response_body = "matching body text".into();
+            }
+            session.status = if index == 102 { 200 } else { 404 };
+            (session, None, None)
+        });
+        history.import_records(records.collect()).unwrap();
+        let conditions = ConditionSet {
+            any: true,
+            items: vec![Condition {
+                field: Field::ResponseBody,
+                value: "matching body".into(),
+                ..Condition::default()
+            }],
+        };
+        let quick = QuickFilters {
+            status: 4,
+            ..QuickFilters::default()
+        };
+        let first = history
+            .filtered_desktop_history_page(None, 0, "", &conditions, &quick)
+            .unwrap();
+        assert_eq!(first.rows.len(), 100);
+        assert!(first.has_more);
+        assert_eq!(first.rows[0].id, "entry-101");
+        let next = history
+            .filtered_desktop_history_page(None, 100, "", &conditions, &quick)
+            .unwrap();
+        assert_eq!(
+            next.rows
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["entry-1", "entry-0"]
+        );
+        assert!(!next.has_more);
+        assert_eq!(next.days[0].total, 205);
     }
 
     #[test]

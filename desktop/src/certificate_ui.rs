@@ -71,7 +71,6 @@ pub(super) struct CertificateUi {
     return_local: bool,
     manual: bool,
     android_usb: bool,
-    qr_open: bool,
     lan: Ipv4Addr,
     adb: PathBuf,
     java: PathBuf,
@@ -89,7 +88,6 @@ impl Default for CertificateUi {
             return_local: false,
             manual: false,
             android_usb: false,
-            qr_open: false,
             lan: Ipv4Addr::LOCALHOST,
             adb: PathBuf::new(),
             java: PathBuf::new(),
@@ -116,7 +114,6 @@ impl CertificateUi {
 
     fn enter(&mut self, page: Page) {
         self.page = Some(page);
-        self.qr_open = false;
         if matches!(page, Page::Android | Page::Ios) {
             self.lan = recho_core::native::proxy_addresses().0;
         }
@@ -306,9 +303,7 @@ impl CertificateUi {
             .inner
         });
         if self.picker.is_none() && (modal.inner || modal.should_close()) {
-            if self.qr_open && !modal.inner {
-                self.qr_open = false;
-            } else if self.return_local {
+            if self.return_local {
                 self.return_local = false;
                 self.enter(Page::Local);
             } else {
@@ -572,15 +567,10 @@ impl CertificateUi {
         step(
             ui,
             "2. 下载 CA 证书",
-            "在 iOS 设备的 Safari 中访问下载地址，允许下载描述文件。",
+            "在 iOS 设备上扫码，或在 Safari 中打开下载地址，允许下载描述文件。",
         );
         copy_row(ui, "下载地址", CERTIFICATE_DOWNLOAD_URL);
-        if ui.selectable_label(self.qr_open, "下载二维码").clicked() {
-            self.qr_open = !self.qr_open;
-        }
-        if self.qr_open {
-            show_qr(ui);
-        }
+        show_qr(ui);
         self.export_button(ui, "手动导出 .crt", CertificateFormat::Der);
         step(
             ui,
@@ -747,7 +737,14 @@ fn show_qr(ui: &mut egui::Ui) {
     let scale = 4.0;
     let margin = 4.0;
     let size = (code.width() as f32 + margin * 2.0) * scale;
-    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(egui::Vec2::splat(size), egui::Sense::hover());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Image,
+            ui.is_enabled(),
+            "CA 证书下载二维码",
+        )
+    });
     ui.painter().rect_filled(rect, 0.0, egui::Color32::WHITE);
     let origin = rect.min + egui::Vec2::splat(margin * scale);
     for (index, color) in code.to_colors().into_iter().enumerate() {

@@ -1,6 +1,8 @@
 mod breakpoint;
 mod editor;
+mod share;
 
+use crate::sharing::ShareUi;
 use crate::theme::{Theme, dialog_columns, dialog_footer, dialog_header, input_text};
 use crate::worker::{RequestHandle, Worker};
 use eframe::egui;
@@ -98,6 +100,7 @@ pub(super) struct RulesUi {
     logs: Option<Vec<Value>>,
     log_reply: Option<RequestHandle>,
     file: Option<(bool, crate::files::FilePick)>,
+    sharing: ShareUi<Value>,
 }
 
 enum RuleReply {
@@ -131,6 +134,7 @@ impl RulesUi {
             || self.new_folder.is_some()
             || self.logs.is_some()
             || self.file.is_some()
+            || self.sharing.is_open()
             || self.breakpoint.is_some()
     }
 
@@ -382,6 +386,16 @@ impl RulesUi {
         {
             ui.colored_label(ui.visuals().error_fg_color, error);
         }
+        if let Some(notice) = self.sharing.notice() {
+            match notice {
+                Ok(message) => {
+                    ui.weak(message);
+                }
+                Err(error) => {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                }
+            }
+        }
         ui.separator();
         if self.rules.is_none() {
             if self.rules_reply.is_some() {
@@ -390,8 +404,10 @@ impl RulesUi {
             return;
         }
 
-        let ready =
-            self.rules_reply.is_none() && self.source_error.is_none() && self.file.is_none();
+        let ready = self.rules_reply.is_none()
+            && self.source_error.is_none()
+            && self.file.is_none()
+            && !self.sharing.is_open();
         let folders = self.folders();
         let mut edit_index = None;
         let mut toggle = None;
@@ -430,6 +446,20 @@ impl RulesUi {
                         }
                     });
                     ui.separator();
+                    ui.menu_button("分享", |ui| {
+                        if let Some(rule) =
+                            selected.and_then(|index| self.rules.as_ref()?.get(index))
+                            && self
+                                .sharing
+                                .export_menu(ui, "recho-rule.json", || share::encode_rule(rule))
+                        {
+                            ui.close();
+                        }
+                        if ui.button("导入分享规则…").clicked() {
+                            self.sharing.open("导入分享规则");
+                            ui.close();
+                        }
+                    });
                     if ui.button("导入").clicked() {
                         self.file = Some((false, crate::files::pick("json", false, ui.ctx())));
                     }
@@ -650,6 +680,17 @@ impl RulesUi {
         self.finish_file(worker);
         if self.open {
             self.rules_dialog(ctx, worker);
+        }
+        if let Some(rule) = self.sharing.poll(ctx, share::preview_rule) {
+            if self.rules_reply.is_some() || self.source_error.is_some() {
+                self.error = Some("规则列表正在更新，请重试。".into());
+            } else if share::requires_local_file(&rule) {
+                self.editor = Some(RuleEditor::relink_import(rule));
+            } else if let Some(mut rules) = self.rules.clone() {
+                let id = rule["id"].as_str().map(str::to_owned);
+                rules.push(rule);
+                self.save_list(worker, rules, id, false);
+            }
         }
         if self.editor.is_some()
             && self.rules.is_none()

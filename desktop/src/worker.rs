@@ -1,7 +1,7 @@
 use eframe::egui;
 use recho_core::native::{
     CaptureBatch, CaptureMatches, ConditionSet, DesktopEngine, Detail, HistoryDeletePlan,
-    HistoryDeletion, HistoryPage, Phase, Snapshot,
+    HistoryDeletion, HistoryPage, Phase, QuickFilters, Snapshot,
 };
 use serde_json::Value;
 use std::{
@@ -71,8 +71,9 @@ pub enum Command {
     },
     History {
         offset: usize,
-        query: String,
         date: Option<String>,
+        conditions: ConditionSet,
+        quick: QuickFilters,
         reply: oneshot::Sender<Result<HistoryPage, String>>,
     },
 }
@@ -326,9 +327,9 @@ impl Worker {
                                     }
                                     Ok(())
                                 }
-                                Command::History { offset, query, date, reply } => {
+                                Command::History { offset, date, conditions, quick, reply } => {
                                     if !reply.is_closed() {
-                                        let _ = reply.send(engine.desktop_history_page(date.as_deref(), offset, &query));
+                                        let _ = reply.send(engine.filtered_desktop_history_page(date.as_deref(), offset, &conditions, &quick));
                                         ctx.request_repaint();
                                     }
                                     Ok(())
@@ -466,14 +467,16 @@ impl Worker {
     pub fn history(
         &self,
         offset: usize,
-        query: String,
         date: Option<String>,
+        conditions: ConditionSet,
+        quick: QuickFilters,
     ) -> Result<HistoryHandle, String> {
         let (reply, receive) = oneshot::channel();
         self.send(Command::History {
             offset,
-            query,
             date,
+            conditions,
+            quick,
             reply,
         })?;
         Ok(receive)
